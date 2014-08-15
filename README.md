@@ -199,7 +199,7 @@ A variety of transient errors can happen when using RESTful APIs like the
 Google Drive API.  When these errors are encountered, skicka makes a number
 of attempts to retry the operation before giving up.
 
-It may be that skicka make more attempts before giving up or that there are
+It may be that skicka should make more attempts before giving up or that there are
 better error handling strategies; one trade-off is that if there is a
 serious error (like the internet connection is lost), then it's useful for
 the user to know this sonner rather than later.
@@ -254,7 +254,7 @@ Note also that this algorithm is an algorithm to efficiently mirror the
 contents of a set of local files on Google Drive; it's not a general
 bidirectional synchronization algorithm.  For example, if a file is
 modified on Drive and on the local filesystem, a `skicka upload` run will
-clobber the file contents on drive.
+clobber the file contents on Drive.
 
 When downloading directory hierarchies from Google Drive, skicka follows the
 same general approach: only files that have different sizes or different
