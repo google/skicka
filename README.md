@@ -177,8 +177,7 @@ the Unix permissions or the local modification of the original file when it
 was uploaded.  Therefore, in this case `skicka download` uses 644
 permissions for files it creates and 755 permissions for directories.
 
-###skicka ls -l indicates that a file has world-readable permissions on
-   Gogle Drive; does this mean anyone can access it?
+###skicka ls -l indicates that a file has world-readable permissions on Gogle Drive; does this mean anyone can access it?
 
 No.  Those permissions are only used to set the local file permissions when
 the file is downloaded with `skicka download`. The access permissions for
@@ -187,15 +186,14 @@ the files stored on Drive are handled with Drive's regular mechanisms.
 ###How can I speed up uploads?
 
 There's a fixed per-file overhead for each file uploaded to Google Drive
-that limits `skicka` to creating roughly five files a second; if files are
+that limits skicka to creating roughly five files a second; if files are
 relatively small, this overhead will be more of a limit than the time spent
 transferring the contents of the files.
 
 If the uploaded files don't need to be accessed individually, creating a
 `tar` or `zip` archive of them before uploading may help in this case.
 
-###I occasionally see "operation timed out" or "broken pipe" errors when
-   uploading; what's going on?
+###I occasionally see "operation timed out" or "broken pipe" errors when uploading; what's going on?
 
 A variety of transient errors can happen when using RESTful APIs like the
 Google Drive API.  When these errors are encountered, skicka makes a number
