@@ -57,6 +57,8 @@ software.  Bug reports are welcome.
      for the application to access your Google Drive files. After you
      click 'accept', copy the code from your browser window to the
      terminal with the "Enter verification code" prompt from skicka.
+     The verification code is stored in the file `~/.skicka.tokencache.json`
+     so that you only need to perform this step once.
    - If you're going store encrypted files in Google Drive, create an
      encryption key: set the environment variable `SKICKA_PASSPHRASE`
      to hold your passphrase and run `skicka genkey`. Copy the lines of
@@ -202,6 +204,12 @@ If you do see these errors, re-run the operation you were performing; any
 files that weren't transferred the first time should be taken care of with
 a second run.
 
+###Does skicka support rate-limited uploads and downloads?
+
+Not yet, but it's a high priority. There is an [open
+issue](https://github.com/google/skicka/issues/1) to track this
+enhancement.
+
 ###"skicka"?!?
 
 Swedish, "to send".
@@ -212,10 +220,12 @@ Swedish, "to send".
 
 When a directory hierarchy is uploaded, Google Drive file is created for
 each local file and a Google Drive folder is created for each local
-directory. skicka uses a Google Drive file Property named "ModificationTime"
-to encode the last time skicka updated the file on Google Drive or confirmed
-that the local file and the Google Drive file were in sync.  This time
-encoded as a string storing int64 Unix nano time.
+directory. skicka uses a Google Drive file Property named
+"ModificationTime" to encode the last time skicka updated the file on
+Google Drive or confirmed that the local file and the Google Drive file
+were in sync.  This time encoded as a string storing int64 Unix nano time.
+The Unix file permissions of the file or directory are stored in a
+"Permissions" property, stored as a string with the octal file permissions.
 
 See the discussion of encryption below for details about how encrypted
 files are represented.
@@ -226,9 +236,9 @@ When deciding if a local file needs to be uploaded to Google Drive,
 skicka performs the following checks.
 
 1. If there is no corresponding file on Drive, the local file will be uploaded.
-2. If there is a corresponding file on Drive and the sizes of the files
+2. Otherwise, if there is a corresponding file on Drive and the sizes of the files
 are different, the local file will be uploaded.
-3. If the local file's modification time is after the modification time of
+3. Otherwise, if the local file's modification time is after the modification time of
 the file the last time it was synced to Drive, then an MD5 checksum of the
 file contents is computed. If this checksum differs from the checksum of
 the file stored on Google Drive, the file will be uploaded. (Thus, if
@@ -236,25 +246,28 @@ the file stored on Google Drive, the file will be uploaded. (Thus, if
 file's contents aren't modified, skicka won't unnecessarily re-upload
 the file.)
 
-Note that skicka trusts that file modification times are meaningful:
-if a file's contents are modified leaving the file size is unchanged and if
-the modification time is set to be in the past, then skicka won't
-compute an MD5 checksum and won't know that the file should be uploaded. To
-override this behavior, run `skicka upload` with the `-ignore-times`
-flag; if this flag is provided, then the MD5 checksum check will be applied
-regardless of the file modification time.
+Note that skicka trusts that file modification times are meaningful: if a
+file's contents are modified leaving the file size is unchanged and if the
+modification time is set to be in the past, then skicka won't compute an
+MD5 checksum and won't know that the file should be uploaded. To override
+this behavior, run `skicka upload` with the `-ignore-times` flag; if this
+flag is provided, then the MD5 checksum check in the third step will be
+applied regardless of the file modification time.
 
 Note also that this algorithm is an algorithm to efficiently mirror the
 contents of a set of local files on Google Drive; it's not a general
 bidirectional synchronization algorithm.  For example, if a file is
-modified on Drive and on the local filesystem, a `skicka upload` run will
-clobber the file contents on Drive.
+modified both on Drive and on the local filesystem, a `skicka upload` run
+will clobber the file contents on Drive. In other words, the assumption is
+that the source directory hierarchy is by definition the canonical one and
+the destination directory's role is to perfectly reflect the source.
 
-When downloading directory hierarchies from Google Drive, skicka follows the
-same general approach: only files that have different sizes or different
-MD5 checksums from the corresponding local file will be downloaded. The
-`-ignore-times` option can also be used to bypass the file modification
-time checks and to force a comparison of file contents for downloads.
+When downloading from Google Drive, skicka follows the same general
+approach: only files that don't yet exist, have different sizes, or
+different MD5 checksums from the corresponding local file will be
+downloaded. The `-ignore-times` option can also be used to bypass the file
+modification time check and to force a comparison of file contents to
+decide whether to download.
 
 ###Encryption
 
@@ -298,7 +311,7 @@ follows:
 
 1. skicka generates a random 32-byte salt using Go's
 [rand.Reader](http://golang.org/pkg/crypto/rand/), which returns
-cryptographically secure pseudo-random numbers. The hex encoded salt is
+cryptographically secure pseudo-random numbers. The hex-encoded salt is
 printed out, and should be recorded in the `salt` field of the
 `[encryption]` section of the config file.
 2. The user's passphrase, read from the `SKICKA_PASSPHRASE` environment
@@ -312,6 +325,8 @@ section of the config file. These bytes are later used only to validate
 that the user has provided the correct passphrase on subsequent runs of
 skicka.
 4. A random 32-byte encryption key is generated (again with rand.Reader).
+This is the key that will actually be used for encryption and decryption of
+file contents.
 5. A random 16-byte initialization vector is generated with rand.Reader. It
 is hex encoded and printed out, and should be copied to the
 `encrypted-key-iv` configuration file field.
@@ -337,6 +352,6 @@ The initialization vector is also stored hex-encoded as a Google Drive file
 Property with the name "IV". We store the initialization vector redundantly
 so that if one downloads the encrypted file contents, it's possible to
 decrypt the file using the file contents (and the key!)  alone. Conversely,
-having the also IV available in a property makes it possible to encrypt the
-contents of an updated local version of the file without needing to
-download any of the contents of the file from Google Drive.
+also having the IV available in a property makes it possible to encrypt the
+contents of a local version of a file without needing to download any of
+the contents of the corresponding file from Google Drive.
