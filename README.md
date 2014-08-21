@@ -210,6 +210,10 @@ Not yet, but it's a high priority. There is an [open
 issue](https://github.com/google/skicka/issues/1) to track this
 enhancement.
 
+###Can an http proxy be used with skicka?
+
+Yes--just set the `HTTP_PROXY` environment variable appropriately.
+
 ###"skicka"?!?
 
 Swedish, "to send".
