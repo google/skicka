@@ -1831,7 +1831,7 @@ func readConfigFile(filename string) {
 		fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
 		os.Exit(1)
 	} else if goperms := info.Mode() & ((1 << 6) - 1); goperms != 0 {
-		fmt.Fprintf(os.Stderr, "skicka: permissions of configuration file "+
+		fmt.Fprintf(os.Stderr, "skicka: %s: permissions of configuration file "+
 			"allow group/other access. Your secrets are at risk.\n",
 			filename)
 		os.Exit(1)
