@@ -570,12 +570,21 @@ func createMissingProperties(f *drive.File, mode os.FileMode, encrypt bool) erro
 		if _, err := getProperty(f, "ModificationTime"); err != nil {
 			syncprop := new(drive.Property)
 			syncprop.Key = "ModificationTime"
-			syncprop.Value = "0"
+
+			// Initially set the modification time to the time
+			// the Drive file was last modified.
+			modfmt := "2006-01-02T15:04:05.000Z"
+			modTime, err := time.Parse(modfmt, f.ModifiedDate)
+			if err != nil {
+				return err
+			}
+			syncprop.Value = fmt.Sprintf("%d", modTime.UnixNano())
+
 			if debug {
 				log.Printf("Creating ModificationTime property for file %s, "+
 					"which doesn't have one.", f.Title)
 			}
-			err := addProperty(syncprop, f)
+			err = addProperty(syncprop, f)
 			if err != nil {
 				return err
 			}
