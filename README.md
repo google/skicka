@@ -44,12 +44,16 @@ software.  Bug reports are welcome.
        - Go to the [Google Developers Console](https://console.developers.google.com/)
        and select "Create Project".
        - After the project is created, choose "APIs and Auth" from
-       the menu on the right, and then choose "Credentials". Select the
+       the menu on the left, and then choose "Credentials". Select the
        "Create new Client Id" button and choose the "Installed Application"
-       type. Select "Other" as the installed application type. Copy the
-       text for "client id" and "client secret" to the corresponding
-       entries in your `~/.skicka.config` file.
-       - Next, select "APIs" under "APIs and Auth" and enable the "Drive
+       type. Select "Other" as the installed application type.
+       - Copy the text for "client id" and "client secret" to the
+       corresponding entries in your `~/.skicka.config` file.
+       - Now, choose "Consent" and set the project name
+         (e.g. to "skicka", and provide an email address). The specific name and
+         email address you choose here doesn't matter; it's only necessary
+         that they be set to something.
+       - Finally, select "APIs" under "APIs and Auth" and enable the "Drive
        API" for this project.
    - Get an OAuth2 token: run `skicka ls /`; skicka will print a
      URL and ask for a token. Go to the URL in a
@@ -173,7 +177,7 @@ the Unix permissions or the local modification of the original file when it
 was uploaded.  Therefore, in this case `skicka download` uses 644
 permissions for files it creates and 755 permissions for directories.
 
-###skicka ls -l indicates that a file has world-readable permissions on Gogle Drive; does this mean anyone can access it?
+###skicka ls -l indicates that a file has world-readable permissions on Google Drive; does this mean anyone can access it?
 
 No.  Those permissions are only used to set the local file permissions when
 the file is downloaded with `skicka download`. The access permissions for
