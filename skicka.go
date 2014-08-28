@@ -134,7 +134,10 @@ func md5Bytes(contents []byte) (string, error) {
 func tildeExpand(path string) (string, error) {
 	path = filepath.Clean(path)
 	if path[:2] == "~/" {
-		usr, _ := user.Current()
+		usr, err := user.Current()
+		if err != nil {
+			return path, err
+		}
 		homedir := usr.HomeDir
 		return strings.Replace(path, "~", homedir, 1), nil
 	} else if path[:1] == "~" {
