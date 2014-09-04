@@ -656,10 +656,11 @@ func createDriveFolder(title string, mode os.FileMode, modTime time.Time,
 
 	parentref := &drive.ParentReference{Id: parentFolder.Id}
 	f := &drive.File{
-		Title:      title,
-		MimeType:   "application/vnd.google-apps.folder",
-		Parents:    []*drive.ParentReference{parentref},
-		Properties: proplist,
+		Title:        title,
+		MimeType:     "application/vnd.google-apps.folder",
+		ModifiedDate: modTime.UTC().Format(timeFormat),
+		Parents:      []*drive.ParentReference{parentref},
+		Properties:   proplist,
 	}
 
 	f, err := insertNewDriveFile(f)
@@ -814,7 +815,7 @@ func updateModificationTime(driveFile *drive.File, t time.Time) error {
 		}
 	}
 	if debug {
-		log.Printf("Updating modification time on %s\n", driveFile.Title)
+		log.Printf("Updated modification time on %s\n", driveFile.Title)
 	}
 	return nil
 }
