@@ -53,6 +53,8 @@ import (
 	"time"
 )
 
+const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
+
 ///////////////////////////////////////////////////////////////////////////
 // Global Variables
 
@@ -570,28 +572,6 @@ func createMissingProperties(f *drive.File, mode os.FileMode, encrypt bool) erro
 				}
 			}
 		}
-		if _, err := getProperty(f, "ModificationTime"); err != nil {
-			syncprop := new(drive.Property)
-			syncprop.Key = "ModificationTime"
-
-			// Initially set the modification time to the time
-			// the Drive file was last modified.
-			modfmt := "2006-01-02T15:04:05.000Z"
-			modTime, err := time.Parse(modfmt, f.ModifiedDate)
-			if err != nil {
-				return err
-			}
-			syncprop.Value = fmt.Sprintf("%d", modTime.UnixNano())
-
-			if debug {
-				log.Printf("Creating ModificationTime property for file %s, "+
-					"which doesn't have one.", f.Title)
-			}
-			err = addProperty(syncprop, f)
-			if err != nil {
-				return err
-			}
-		}
 	}
 	if _, err := getProperty(f, "Permissions"); err != nil {
 		syncprop := new(drive.Property)
@@ -645,11 +625,6 @@ func createDriveFile(filename string, mode os.FileMode, modTime time.Time, encry
 		ivprop.Value = ivhex
 		proplist = append(proplist, ivprop)
 	}
-	timeprop := new(drive.Property)
-	timeprop.Key = "ModificationTime"
-	timeprop.Value = fmt.Sprintf("%d", modTime.UnixNano())
-	proplist = append(proplist, timeprop)
-
 	permprop := new(drive.Property)
 	permprop.Key = "Permissions"
 	permprop.Value = fmt.Sprintf("%#o", mode&os.ModePerm)
@@ -657,17 +632,21 @@ func createDriveFile(filename string, mode os.FileMode, modTime time.Time, encry
 
 	folderParent := &drive.ParentReference{Id: parentFolder.Id}
 	f := &drive.File{
-		Title:      filepath.Base(filename),
-		MimeType:   "application/octet-stream",
-		Parents:    []*drive.ParentReference{folderParent},
-		Properties: proplist,
+		Title:        filepath.Base(filename),
+		MimeType:     "application/octet-stream",
+		Parents:      []*drive.ParentReference{folderParent},
+		ModifiedDate: modTime.UTC().Format(timeFormat),
+		Properties:   proplist,
+	}
+	if debug {
+		log.Printf("inserting %#v\n", f)
 	}
 
 	return insertNewDriveFile(f)
 }
 
-// Create a *drive.File for the folder with the given title and parent fodler.
-func createDriveFolder(title string, mode os.FileMode,
+// Create a *drive.File for the folder with the given title and parent folder.
+func createDriveFolder(title string, mode os.FileMode, modTime time.Time,
 	parentFolder *drive.File) (*drive.File, error) {
 	var proplist []*drive.Property
 	permprop := new(drive.Property)
@@ -821,8 +800,23 @@ func getInitializationVector(driveFile *drive.File) ([]byte, error) {
 }
 
 func updateModificationTime(driveFile *drive.File, t time.Time) error {
-	return updateProperty(driveFile, "ModificationTime",
-		fmt.Sprintf("%d", t.UnixNano()))
+	if debug {
+		log.Printf("updating modification time of %s to %v\n",
+			driveFile.Title, t)
+	}
+	for ntries := 0; ; ntries++ {
+		f := &drive.File{ModifiedDate: t.UTC().Format(timeFormat)}
+		_, err := drivesvc.Files.Patch(driveFile.Id, f).SetModifiedDate(true).Do()
+		if err == nil {
+			return err
+		} else if err = tryToHandleDriveAPIError(err, ntries); err != nil {
+			return err
+		}
+	}
+	if debug {
+		log.Printf("Updating modification time on %s\n", driveFile.Title)
+	}
+	return nil
 }
 
 func updatePermissions(driveFile *drive.File, mode os.FileMode) error {
@@ -860,21 +854,11 @@ func updateProperty(driveFile *drive.File, name string, newValue string) error {
 }
 
 func getModificationTime(driveFile *drive.File) (time.Time, error) {
-	lastsyncprop, err := getProperty(driveFile, "ModificationTime")
-	if err != nil {
-		// The "ModificationTime" property may not be present if we're
-		// doing something with a file that wasn't created by skicka;
-		// in this case, we use Google Drive's modified date value as
-		// a proxy.
-		fmt := "2006-01-02T15:04:05.000Z"
-		modTime, err := time.Parse(fmt, driveFile.ModifiedDate)
-		return modTime, err
+	if driveFile.ModifiedDate != "" {
+		return time.Parse(time.RFC3339Nano, driveFile.ModifiedDate)
+	} else {
+		return time.Unix(0, 0), nil
 	}
-	unixnano, err := strconv.ParseInt(lastsyncprop, 10, 64)
-	if err != nil {
-		return time.Unix(0, 0), err
-	}
-	return time.Unix(0, unixnano), nil
 }
 
 func getPermissions(driveFile *drive.File) (os.FileMode, error) {
@@ -886,8 +870,7 @@ func getPermissions(driveFile *drive.File) (os.FileMode, error) {
 	return os.FileMode(perm), err
 }
 
-// Upload the given file contents to the given *drive.File and update
-// the file's modification time to match the local time, if successful.
+// Upload the given file contents to the given *drive.File.
 func uploadFileContents(driveFile *drive.File, contents []byte,
 	file LocalFile) error {
 	contentsreader := bytes.NewReader(contents)
@@ -1087,11 +1070,14 @@ func fileMetadataMatches(info os.FileInfo, encrypt bool,
 		return true, err
 	}
 
-	// Finally, check if the local modification time is after the
+	// Finally, check if the local modification time is different than the
 	// modification time of the file the last time it was updated on Drive;
 	// if it is, we return false and an upload will be done..
 	localTime := info.ModTime()
-	return !localTime.After(driveTime), nil
+	if debug {
+		log.Printf("localTime: %v, driveTime: %v\n", localTime, driveTime)
+	}
+	return localTime.Equal(driveTime), nil
 }
 
 // Returns the contents of the given file, in a format suitable for upload:
@@ -1126,6 +1112,9 @@ func getFileContentsForUpload(path string, encrypt bool, iv []byte) ([]byte, err
 // appropriately.
 func syncFileUp(file LocalFile, encrypt, ignoreTimes bool,
 	existingDriveFiles map[string]*drive.File) error {
+	if debug {
+		log.Printf("syncFileUp: %#v\n", file.FileInfo)
+	}
 	driveFile, ok := existingDriveFiles[file.DrivePath]
 	if ok {
 		// The file already exists on Drive; just make sure it has all
@@ -1169,7 +1158,7 @@ func syncFileUp(file LocalFile, encrypt, ignoreTimes bool,
 		baseName := filepath.Base(file.DrivePath)
 		if file.FileInfo.IsDir() {
 			driveFile, err = createDriveFolder(baseName,
-				file.FileInfo.Mode(), parentFile)
+				file.FileInfo.Mode(), file.FileInfo.ModTime(), parentFile)
 			if verbose {
 				log.Printf("Created Google Drive folder %s\n",
 					file.DrivePath)
@@ -1184,7 +1173,7 @@ func syncFileUp(file LocalFile, encrypt, ignoreTimes bool,
 			//
 			// Note that if the contents of Google Drive are modified in
 			// another session, this map may become stale; we don't
-			//  explicitly look out for this and will presumably error out
+			// explicitly look out for this and will presumably error out
 			// in interesting ways if it does happen.
 			existingDriveFiles[file.DrivePath] = driveFile
 		} else {
@@ -1197,9 +1186,17 @@ func syncFileUp(file LocalFile, encrypt, ignoreTimes bool,
 	}
 
 	if file.FileInfo.IsDir() {
-		// If it's a directory, once it's created and the permissions
+		// If it's a directory, once it's created and the permissions and times
 		// are updated (if needed), we're all done.
-		return nil
+		t, err := getModificationTime(driveFile)
+		if err != nil {
+			return err
+		}
+		if !t.Equal(file.FileInfo.ModTime()) {
+			return updateModificationTime(driveFile, file.FileInfo.ModTime())
+		} else {
+			return nil
+		}
 	}
 
 	metadataMatches, err := fileMetadataMatches(file.FileInfo, encrypt,
@@ -1231,10 +1228,13 @@ func syncFileUp(file LocalFile, encrypt, ignoreTimes bool,
 	contentsMatch := md5contents == driveFile.Md5Checksum
 
 	if contentsMatch {
-		// The timestamp of the local file is newer, but the contents
+		// The timestamp of the local file is different, but the contents
 		// are unchanged versus what's on Drive, so just update the
 		// modified time on Drive so that we don't keep checking this
 		// file.
+		if debug {
+			log.Printf("contents match, timestamps do not")
+		}
 		return updateModificationTime(driveFile, file.FileInfo.ModTime())
 	} else if metadataMatches == true {
 		// We're running with -ignore-times, the modification times
@@ -1628,8 +1628,8 @@ func syncFileDown(localPath string, driveFilename string, driveFile *drive.File,
 	atomic.AddInt64(&stats.DiskWriteBytes, int64(len(contents)))
 	atomic.AddInt64(&stats.LocalFilesUpdated, 1)
 
-	// Set the last access and moficiation time of the newly-created
-	// file to match the modificaiton time of the original file that was
+	// Set the last access and modification time of the newly-created
+	// file to match the modification time of the original file that was
 	// uploaded to Google Drive.
 	if modifiedTime, err := getModificationTime(driveFile); err == nil {
 		return os.Chtimes(localPath, modifiedTime, modifiedTime)
@@ -2026,7 +2026,7 @@ func mkdir() {
 			// directory in the provided path or if -p was specified.
 			// Otherwise, error time.
 			if index+1 == nDirs || makeIntermediate {
-				parent, err = createDriveFolder(dir, 0755, parent)
+				parent, err = createDriveFolder(dir, 0755, time.Now(), parent)
 				if debug {
 					log.Printf("Creating folder %s\n",
 						pathSoFar)
