@@ -217,8 +217,7 @@ var lastStatsTime time.Time = time.Now()
 var lastStatsBytes int64
 var maxActiveBytes int64
 
-// Called to print overall statistics after an upload or download is finished.
-func printFinalStats() {
+func updateActiveMemory() {
 	statsMutex.Lock()
 	defer statsMutex.Unlock()
 
@@ -228,6 +227,14 @@ func printFinalStats() {
 	if activeBytes > maxActiveBytes {
 		maxActiveBytes = activeBytes
 	}
+}
+
+// Called to print overall statistics after an upload or download is finished.
+func printFinalStats() {
+	updateActiveMemory()
+
+	statsMutex.Lock()
+	defer statsMutex.Unlock()
 
 	syncTime := time.Now().Sub(syncStartTime)
 	fmt.Printf("skicka: preparation time %s, sync time %s\n",
@@ -1303,6 +1310,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 					localFile.LocalPath, err)
 			}
 			progressBar.Increment()
+			updateActiveMemory()
 		}
 	}
 
@@ -1611,6 +1619,7 @@ func syncHierarchyDown(drivePath string, localPath string,
 				fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
 			}
 			fileBar.Increment()
+			updateActiveMemory()
 		}
 	}
 
