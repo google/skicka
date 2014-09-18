@@ -118,18 +118,6 @@ func timeDelta(event string) {
 	lastTimeDelta = now
 }
 
-// Computes the MD5 checksum of the given bytes, returning it in the form of
-// a string.
-func md5Bytes(contents []byte) (string, error) {
-	md5 := md5.New()
-	contentsreader := bytes.NewReader(contents)
-	_, err := io.Copy(md5, contentsreader)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%x", md5.Sum(nil)), nil
-}
-
 // If the given path starts with a tilde, performs shell glob expansion
 // to convert it to the path to a home directory. Otherwise returns the
 // path unchanged.
@@ -1222,10 +1210,7 @@ func syncFileUp(file LocalFile, encrypt, ignoreTimes bool,
 		return err
 	}
 
-	md5contents, err := md5Bytes(contents)
-	if err != nil {
-		return err
-	}
+	md5contents := fmt.Sprintf("%x", md5.Sum(contents))
 	contentsMatch := md5contents == driveFile.Md5Checksum
 
 	if contentsMatch {
@@ -1515,10 +1500,7 @@ func fileNeedsDownload(localPath string, drivePath string, driveFile *drive.File
 		return false, err
 	}
 
-	md5contents, err := md5Bytes(contents)
-	if err != nil {
-		return false, err
-	}
+	md5contents := fmt.Sprintf("%x", md5.Sum(contents))
 	if ignoreTimes && md5contents != driveFile.Md5Checksum &&
 		stat.ModTime().After(lastsynctime) == false {
 		fmt.Fprintf(os.Stderr, "skicka: warning: %s is older than "+
