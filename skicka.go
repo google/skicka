@@ -1752,8 +1752,8 @@ func syncHierarchyDown(drivePath string, localPath string,
 // Create an empty configuration file for the user to use as a starting-point.
 func createConfigFile(filename string) {
 	contents := `; Default .skicka.config file. See 
-; http://github.com/google/skicka/README.md for more information about
-; setting up skicka.
+; https://github.com/google/skicka/blob/master/README.md for more
+; information about setting up skicka.
 [google]
 	clientid=YOUR_GOOGLE_APP_CLIENT_ID
 	clientsecret=YOUR_GOOGLE_APP_SECRET
