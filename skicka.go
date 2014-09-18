@@ -209,92 +209,13 @@ func fmtDuration(d time.Duration) string {
 	return str + fmt.Sprintf("%ds", seconds%60)
 }
 
-// A few values that printStats() uses to do its work
+// A few values that printFinalStats() uses to do its work
 var startTime time.Time = time.Now()
 var syncStartTime time.Time
 var statsMutex sync.Mutex
 var lastStatsTime time.Time = time.Now()
 var lastStatsBytes int64
 var maxActiveBytes int64
-
-// During uploads and downloads, printStats is called after the work is done
-// for each file. It takes the number of files finished, the total number there
-// are to process, and the total number of bytes uploaded or downloaded so far.
-// If either 30s have elapsed or 16MiB of data have been transferred since the
-// the last time statistics were printed, it prints out running statistics about
-// the operation being performed.
-func printStats(done, todo int, isUpload bool) {
-	statsMutex.Lock()
-	defer statsMutex.Unlock()
-
-	nowtime := time.Now()
-	var bytes int64
-	if isUpload {
-		bytes = stats.UploadBytes
-	} else {
-		bytes = stats.DownloadBytes
-	}
-	bytesPerSecRecent := float64(bytes-lastStatsBytes) /
-		nowtime.Sub(lastStatsTime).Seconds()
-
-	// Return if not enough data has been transferred or not enough time
-	// has passed since the last time statistics were printed.
-	if bytes-lastStatsBytes < 16*1024*1024 &&
-		nowtime.Sub(lastStatsTime).Seconds() < 30 {
-		return
-	}
-
-	var memstats runtime.MemStats
-	runtime.ReadMemStats(&memstats)
-	// Why isn't memstats.Alloc a 64-bit int?!
-	activeBytes := int64(memstats.Alloc)
-	if activeBytes > maxActiveBytes {
-		maxActiveBytes = activeBytes
-	}
-
-	str := "skicka: "
-	if todo > 0 {
-		str = fmt.Sprintf("[%4d/%4d] ", done, todo)
-	}
-
-	syncTime := time.Now().Sub(syncStartTime)
-	str += fmt.Sprintf("sync time %s", fmtDuration(syncTime))
-
-	if stats.DriveFilesUpdated > 0 {
-		str += fmt.Sprintf(", updated %d Google Drive files",
-			stats.DriveFilesUpdated)
-	}
-	if stats.LocalFilesUpdated > 0 {
-		str += fmt.Sprintf(", updated %d local files", stats.LocalFilesUpdated)
-	}
-	if stats.DiskReadBytes > 0 {
-		str += fmt.Sprintf(", %s read from disk",
-			fmtbytes(stats.DiskReadBytes, false))
-	}
-	if stats.DiskWriteBytes > 0 {
-		str += fmt.Sprintf(", %s written to disk",
-			fmtbytes(stats.DiskWriteBytes, false))
-	}
-	if stats.DownloadBytes > 0 {
-		str += fmt.Sprintf(", %s downloaded (overall %s/s, recent %s/s)",
-			fmtbytes(stats.DownloadBytes, false),
-			fmtbytes(int64(float64(stats.DownloadBytes)/syncTime.Seconds()),
-				false),
-			fmtbytes(int64(bytesPerSecRecent), false))
-	}
-	if stats.UploadBytes > 0 {
-		str += fmt.Sprintf(", %s uploaded (overall %s/s, recent %s/s)",
-			fmtbytes(stats.UploadBytes, false),
-			fmtbytes(int64(float64(stats.UploadBytes)/syncTime.Seconds()),
-				false),
-			fmtbytes(int64(bytesPerSecRecent), false))
-	}
-
-	lastStatsBytes = bytes
-	lastStatsTime = nowtime
-
-	fmt.Println(str)
-}
 
 // Called to print overall statistics after an upload or download is finished.
 func printFinalStats() {
