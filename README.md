@@ -49,7 +49,7 @@ software.  Bug reports are welcome.
        type. Select "Other" as the installed application type.
        - Copy the text for "client id" and "client secret" to the
        corresponding entries in your `~/.skicka.config` file.
-       - Now, choose "Consent" and set the project name
+       - Now, choose "Consent screen" and set the project name
          (e.g. to "skicka", and provide an email address). The specific name and
          email address you choose here doesn't matter; it's only necessary
          that they be set to something.
