@@ -40,6 +40,7 @@ import (
 	"log"
 	mathrand "math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -82,7 +83,8 @@ var (
 			Encrypted_key_iv string
 		}
 		Upload struct {
-			Ignored_Regexp []string
+			Ignored_Regexp         []string
+			Bytes_per_second_limit int
 		}
 	}
 
@@ -787,18 +789,101 @@ func getPermissions(driveFile *drive.File) (os.FileMode, error) {
 	return os.FileMode(perm), err
 }
 
+type LimitedReader struct {
+	buf          []byte
+	offset       int
+	lastReadTime time.Time
+}
+
+var bandwidthBudgetMutex sync.Mutex
+
+// Maximum number of bytes of data that we are currently allowed to
+// upload given the bandwidth limits set by the user, if any.
+var uploadBudget int
+
+func (r *LimitedReader) Seek(offset int) error {
+	if offset > len(r.buf) {
+		return fmt.Errorf("Seek past end of buffer")
+	}
+	r.offset = offset
+	return nil
+}
+
+func (r *LimitedReader) Read(dst []byte) (int, error) {
+	if r.offset == len(r.buf) {
+		return 0, io.EOF
+	}
+
+	for {
+		n := len(dst)
+		if config.Upload.Bytes_per_second_limit > 0 {
+			bandwidthBudgetMutex.Lock()
+			if uploadBudget == 0 {
+				// No further uploading is possible at the moment;
+				// sleep for a bit and then we'll try the loop
+				// again and see if we have better luck...
+				// TODO: we could also wait on a condition
+				// variable and wait to be signaled by the "add
+				// more available upload bytes" thread.
+				bandwidthBudgetMutex.Unlock()
+				time.Sleep(time.Duration(100) * time.Millisecond)
+				continue
+			}
+			// Don't try to upload more than we're allowed to.
+			if n > uploadBudget {
+				n = uploadBudget
+			}
+			// And don't try to upload more data than is available!
+			if r.offset+n > len(r.buf) {
+				n = len(r.buf) - r.offset
+			}
+
+			uploadBudget -= n
+			if uploadBudget < 0 {
+				panic("budget")
+			}
+			bandwidthBudgetMutex.Unlock()
+		}
+
+		copy(dst, r.buf[r.offset:r.offset+n])
+		r.offset += n
+
+		return n, nil
+	}
+}
+
+func NewLimitedReader(c []byte) *LimitedReader {
+	return &LimitedReader{
+		buf: c,
+	}
+}
+
 // Upload the given file contents to the given *drive.File.
-func uploadFileContents(driveFile *drive.File, contents []byte,
-	file LocalFile) error {
-	contentsreader := bytes.NewReader(contents)
+func uploadFileContents(driveFile *drive.File, contents []byte) error {
+	params := make(url.Values)
+	params.Set("uploadType", "media")
+
+	urls := "https://www.googleapis.com/upload/drive/v2/files/{fileId}"
+	urls += "?" + params.Encode()
+
 	for ntries := 0; ; ntries++ {
-		_, err := drivesvc.Files.Update(driveFile.Id,
-			driveFile).Media(contentsreader).Do()
-		if err == nil {
-			return err
-		} else if err = tryToHandleDriveAPIError(err, ntries); err != nil {
+		body := NewLimitedReader(contents)
+		req, _ := http.NewRequest("PUT", urls, body)
+
+		req.URL.Path = strings.Replace(req.URL.Path, "{fileId}", url.QueryEscape(driveFile.Id), 1)
+		googleapi.SetOpaque(req.URL)
+		req.ContentLength = int64(len(contents))
+		req.Header.Set("Content-Type", http.DetectContentType(contents))
+		req.Header.Set("User-Agent", "skicka/0.1")
+
+		resp, err := oAuthTransport.RoundTrip(req)
+		if err == nil && resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+			googleapi.CloseBody(resp)
+			return nil
+		} else if err = tryToHandleHTTPError(err, resp, ntries); err != nil {
 			return err
 		}
+		// Otherwise try again through the loop...
 	}
 }
 
@@ -902,6 +987,44 @@ func tryToHandleDriveAPIError(err error, ntries int) error {
 			}
 			// Otherwise fall through to sleep/backoff...
 		}
+	}
+
+	// Exponential backoff to handle rate-limit errors.
+	s := time.Duration(1<<uint(ntries))*time.Second +
+		time.Duration(mathrand.Int()%1000)*time.Millisecond
+	time.Sleep(s)
+	if debug {
+		log.Printf("Slept for %s due to %v error.\n", s.String(), err)
+	}
+	return nil
+}
+
+func tryToHandleHTTPError(err error, resp *http.Response, ntries int) error {
+	maxAPIRetries := 6
+	if debug {
+		if resp != nil {
+			b, _ := ioutil.ReadAll(resp.Body)
+			log.Printf("tryToHandleHTTPError: ntries %d resp %v (%s) error %T %+v\n",
+				ntries, resp.StatusCode, b, err, err)
+		} else {
+			log.Printf("tryToHandleHTTPError: ntries %d resp %v error %T %+v\n",
+				ntries, *resp, err, err)
+		}
+	}
+	if ntries == maxAPIRetries {
+		return err
+	}
+	if err == nil && resp.StatusCode == 401 {
+		// After an hour, the OAuth2 token expires and needs to
+		// be refreshed.
+		if debug {
+			log.Printf("Trying OAuth2 token refresh.")
+		}
+		if err := oAuthTransport.Refresh(); err == nil {
+			// Success
+			return nil
+		}
+		// Otherwise fall through to sleep/backoff...
 	}
 
 	// Exponential backoff to handle rate-limit errors.
@@ -1164,7 +1287,7 @@ func syncFileUp(file LocalFile, encrypt, ignoreTimes bool,
 			"modification time and re-run skicka if you do want to" +
 			"update the file.")
 	} else {
-		err = uploadFileContents(driveFile, contents, file)
+		err = uploadFileContents(driveFile, contents)
 		if err != nil {
 			return err
 		}
@@ -1190,6 +1313,30 @@ func syncHierarchyUp(localPath string, driveRoot string,
 		if err != nil {
 			return err
 		}
+	}
+
+	// Kick off a background thread to periodically allow uploading
+	// a bit more data.  This allowance is consumed by the
+	// LimitedReader Read() function.
+	if config.Upload.Bytes_per_second_limit > 0 {
+		go func() {
+			for {
+				bandwidthBudgetMutex.Lock()
+
+				// The 92/100 factor adds some slop to account for TCP/IP
+				// overhead in an effort to have our actual bandwidh used
+				// not exceed the desired limit.  Then, we release 1/8th of
+				// the per-second limit every 8th of a second.
+				limit := config.Upload.Bytes_per_second_limit
+				uploadBudget += limit * 92 / 100 / 8
+				if uploadBudget > limit {
+					uploadBudget = limit
+				}
+
+				bandwidthBudgetMutex.Unlock()
+				time.Sleep(time.Duration(125) * time.Millisecond)
+			}
+		}()
 	}
 
 	// Walk the local directory hierarchy starting at 'localPath' and build
@@ -1681,6 +1828,10 @@ func createConfigFile(filename string) {
         ; line for each such regular expression.
 	;ignored-regexp="\\.o$"
 	;ignored-regexp=~$
+	;
+	; To limit upload bandwidth, you can set the maximum (average)
+	; bytes per second that will be used for uploads
+	;bytes-per-second-limit=524288  ; 512kB
 `
 	// Don't overwrite an already-existing configuration file.
 	if _, err := os.Stat(filename); os.IsNotExist(err) {

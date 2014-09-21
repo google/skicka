@@ -210,9 +210,11 @@ a second run.
 
 ###Does skicka support rate-limited uploads and downloads?
 
-Not yet, but it's a high priority. There is an [open
-issue](https://github.com/google/skicka/issues/1) to track this
-enhancement.
+There is now support for rate-limited uploads (and rate-limited downloads
+will come in time).  Add a line `bytes-per-second-limit=...` in the
+`[upload]` section of your `.skicka.config` file to specify a maximum
+number of bytes per second to transfer.  If this line isn't present (or has
+a value of zero), then upload bandwidth won't be limited.
 
 ###Can an http proxy be used with skicka?
 
