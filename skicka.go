@@ -1542,7 +1542,7 @@ func fileNeedsDownload(localPath string, drivePath string, driveFile *drive.File
 		return true, nil
 	}
 
-	lastsynctime, err := getModificationTime(driveFile)
+	driveModificationTime, err := getModificationTime(driveFile)
 	if err != nil {
 		if debug {
 			log.Printf("unable to get modification time for %s: %v\n",
@@ -1551,10 +1551,10 @@ func fileNeedsDownload(localPath string, drivePath string, driveFile *drive.File
 		return true, nil
 	}
 	if ignoreTimes == false {
-		if stat.ModTime() == lastsynctime {
+		if stat.ModTime().Equal(driveModificationTime) {
 			return false, nil
 		}
-		if stat.ModTime().After(lastsynctime) {
+		if stat.ModTime().After(driveModificationTime) {
 			fmt.Fprintf(os.Stderr, "skicka: warning: file %s is more "+
 				"recent than %s on Google Drive. Skipping download.\n",
 				localPath, drivePath)
@@ -1578,7 +1578,7 @@ func fileNeedsDownload(localPath string, drivePath string, driveFile *drive.File
 
 	md5contents := fmt.Sprintf("%x", md5.Sum(contents))
 	if ignoreTimes && md5contents != driveFile.Md5Checksum &&
-		stat.ModTime().After(lastsynctime) == false {
+		stat.ModTime().After(driveModificationTime) == false {
 		fmt.Fprintf(os.Stderr, "skicka: warning: %s is older than "+
 			"file in Google Drive but file contents differ!\n",
 			localPath)
