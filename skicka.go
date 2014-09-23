@@ -283,23 +283,27 @@ func encryptBytes(key []byte, iv []byte, plaintext []byte) {
 }
 
 // Decrypt the given cyphertext using the given encryption key and
-// initialiazaion vector 'iv'. Decryption is done in place.
-func decryptBytes(key []byte, iv []byte, ciphertext []byte) {
+// initialiazaion vector 'iv'.
+func decryptBytes(key []byte, iv []byte, ciphertext []byte) []byte {
+	r, _ := ioutil.ReadAll(makeDecryptionReader(key, iv, bytes.NewReader(ciphertext)))
+	return r
+}
+
+func makeDecryptionReader(key []byte, iv []byte, reader io.Reader) io.Reader {
 	if key == nil {
-		log.Fatalf("uninitialized key in decryptBytes()")
+		log.Fatalf("uninitialized key in makeDecryptionReader()")
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		log.Fatalf("unable to create AES cypher: %v", err)
 	}
-
 	if len(iv) != aes.BlockSize {
 		log.Fatalf("IV length %d != aes.BlockSize %d\n", len(iv),
 			aes.BlockSize)
 	}
 
 	stream := cipher.NewCFBDecrypter(block, iv)
-	stream.XORKeyStream(ciphertext, ciphertext)
+	return &cipher.StreamReader{S: stream, R: reader}
 }
 
 // Return the given number of bytes of random values, using a
@@ -381,9 +385,9 @@ func decryptEncryptionKey() ([]byte, error) {
 	// Use the last 32 bytes of the derived key to decrypt the actual
 	// encryption key.
 	keyEncryptKey := derivedKey[32:]
-	decryptBytes(keyEncryptKey, encryptedKeyIv, encryptedKey)
+	decryptedKey := decryptBytes(keyEncryptKey, encryptedKeyIv, encryptedKey)
 
-	return encryptedKey, nil
+	return decryptedKey, nil
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -887,8 +891,8 @@ func uploadFileContents(driveFile *drive.File, contents []byte) error {
 	}
 }
 
-// Download the contents of the *drive.File.
-func downloadFileContents(driveFile *drive.File) ([]byte, error) {
+// Get the contents of the *drive.File as an io.ReadCloser.
+func getDriveFileContentsReader(driveFile *drive.File) (io.ReadCloser, error) {
 	maxAPIRetries := 8
 
 	// The file download URL expires some hours after it's retrieved;
@@ -901,13 +905,6 @@ func downloadFileContents(driveFile *drive.File) ([]byte, error) {
 	url := driveFile.DownloadUrl
 
 	for ntries := 0; ntries < maxAPIRetries; ntries++ {
-		/*
-			resp, err := oAuthTransport.Client().Get(url)
-			if debug && resp != nil {
-				log.Printf("GET %s -> %s %s\n", url, resp.Proto, resp.Status)
-			}
-		*/
-		// This apparently handles refreshing OAuth2 tokens
 		request, err := http.NewRequest("GET", url, nil)
 		if err != nil {
 			return nil, err
@@ -915,8 +912,7 @@ func downloadFileContents(driveFile *drive.File) ([]byte, error) {
 		resp, err := oAuthTransport.RoundTrip(request)
 
 		if err == nil {
-			defer resp.Body.Close()
-			return ioutil.ReadAll(resp.Body)
+			return resp.Body, nil
 		} else if resp == nil {
 			return nil, err
 		} else {
@@ -1655,14 +1651,10 @@ func syncFileDown(localPath string, driveFilename string, driveFile *drive.File,
 	}
 
 	// Otherwise go ahead and download the contents of the file from Drive.
-	contents, err := downloadFileContents(driveFile)
+	contentsReader, err := getDriveFileContentsReader(driveFile)
+	defer contentsReader.Close()
 	if err != nil {
 		return err
-	}
-
-	atomic.AddInt64(&stats.DownloadBytes, int64(len(contents)))
-	if debug {
-		log.Printf("Downloaded %d bytes for %s\n", len(contents), localPath)
 	}
 
 	// Decrypt the contents, if they're encrypted.
@@ -1673,27 +1665,44 @@ func syncFileDown(localPath string, driveFilename string, driveFile *drive.File,
 				return err
 			}
 		}
-		if len(contents) < aes.BlockSize {
-			return fmt.Errorf("contents too short to "+
-				"hold IV: %d bytes", len(contents))
+
+		// Read the initialization vector from the start of the file.
+		iv := make([]byte, 16)
+		n, err := contentsReader.Read(iv)
+		if err != nil {
+			return err
 		}
+		if n < aes.BlockSize {
+			return fmt.Errorf("contents too short to hold IV: %d bytes", n)
+		}
+		// TODO: we should probably double check that the IV
+		// matches the one in the Drive metadata and fail hard if not...
 
-		iv := contents[:aes.BlockSize]
-		contents = contents[aes.BlockSize:]
-
-		decryptBytes(key, iv, contents)
+		contentsReader = ioutil.NopCloser(makeDecryptionReader(key, iv, contentsReader))
 	}
 
 	// Create or overwrite the local file.
-	if verbose {
-		log.Printf("Writing %d bytes to %s\n", len(contents), localPath)
-	}
-	err = ioutil.WriteFile(localPath, contents, permissions)
+	f, err := os.Create(localPath)
 	if err != nil {
 		return err
 	}
+	defer f.Close()
 
-	atomic.AddInt64(&stats.DiskWriteBytes, int64(len(contents)))
+	f.Chmod(permissions)
+
+	contentsLength, err := io.Copy(f, contentsReader)
+	if err != nil {
+		return err
+	}
+	atomic.AddInt64(&stats.DownloadBytes, contentsLength)
+	if debug {
+		log.Printf("Downloaded %d bytes for %s\n", contentsLength, localPath)
+	}
+	if verbose {
+		log.Printf("Wrote %d bytes to %s\n", contentsLength, localPath)
+	}
+
+	atomic.AddInt64(&stats.DiskWriteBytes, contentsLength)
 	atomic.AddInt64(&stats.LocalFilesUpdated, 1)
 
 	// Set the last access and modification time of the newly-created
@@ -2044,12 +2053,18 @@ func cat() {
 		os.Exit(1)
 	}
 
-	contents, err := downloadFileContents(file)
+	contentsReader, err := getDriveFileContentsReader(file)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", filename, err)
 		os.Exit(1)
 	}
-	fmt.Print(string(contents))
+	defer contentsReader.Close()
+
+	_, err = io.Copy(os.Stdout, contentsReader)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", filename, err)
+		os.Exit(1)
+	}
 }
 
 func mkdir() {
