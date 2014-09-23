@@ -1641,7 +1641,16 @@ func syncFileDown(localPath string, driveFilename string, driveFile *drive.File,
 				driveFilename)
 		}
 		// Even if we don't update the file contents, make sure that
-		// the local permissions match the permission stored in Drive.
+		// the local permissions and modification time match the
+		// corresponding values stored in Drive.
+		modifiedTime, err := getModificationTime(driveFile)
+		if err != nil {
+			return err
+		}
+		err = os.Chtimes(localPath, modifiedTime, modifiedTime)
+		if err != nil {
+			return err
+		}
 		return os.Chmod(localPath, permissions)
 	}
 
