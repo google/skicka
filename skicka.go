@@ -1003,8 +1003,8 @@ func tryToHandleHTTPError(err error, resp *http.Response, ntries int) error {
 			log.Printf("tryToHandleHTTPError: ntries %d resp %v (%s) error %T %+v\n",
 				ntries, resp.StatusCode, b, err, err)
 		} else {
-			log.Printf("tryToHandleHTTPError: ntries %d resp %v error %T %+v\n",
-				ntries, *resp, err, err)
+			log.Printf("tryToHandleHTTPError: ntries %d error %T %+v\n",
+				ntries, err, err)
 		}
 	}
 	if ntries == maxAPIRetries {
