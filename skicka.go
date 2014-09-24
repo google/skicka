@@ -1407,12 +1407,15 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	progressBar.ShowBar = true
 	progressBar.Output = os.Stderr
 
+	nUploadErrors := int32(0)
+
 	// And finally sync the directories, which serves to create any missing ones.
 	for _, dirName := range directoryNames {
 		file := directoryMap[dirName]
 		err = syncFileUp(file, encrypt, ignoreTimes, existingFiles)
 		progressBar.Increment()
 		if err != nil {
+			nUploadErrors++
 			fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", file.LocalPath, err)
 			os.Exit(1)
 		}
@@ -1449,6 +1452,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 			err := syncFileUp(localFile, encrypt, ignoreTimes,
 				existingFiles)
 			if err != nil {
+				atomic.AddInt32(&nUploadErrors, 1)
 				fmt.Fprintf(os.Stderr, "skicka: %s: %v\n",
 					localFile.LocalPath, err)
 			}
@@ -1480,7 +1484,12 @@ func syncHierarchyUp(localPath string, driveRoot string,
 
 	timeDelta("Sync files")
 
-	return nil
+	if nUploadErrors == 0 {
+		return nil
+	} else {
+		return fmt.Errorf("%d files not uploaded due to errors",
+			nUploadErrors)
+	}
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -1718,7 +1727,7 @@ func syncFileDown(localPath string, driveFilename string, driveFile *drive.File,
 // Download the full hierarchy of files from Google Drive starting at
 // 'driveRoot', recreating it at 'localPath'.
 func syncHierarchyDown(drivePath string, localPath string,
-	existingFiles map[string]*drive.File, ignoreTimes bool) {
+	existingFiles map[string]*drive.File, ignoreTimes bool) error {
 	var driveFilenames []string
 	for name, _ := range existingFiles {
 		driveFilenames = append(driveFilenames, name)
@@ -1737,6 +1746,8 @@ func syncHierarchyDown(drivePath string, localPath string,
 		os.Exit(1)
 	}
 
+	nDownloadErrors := int32(0)
+
 	// First do the folders, so that all of the directories we need have
 	// been created before we start the files.
 	for _, driveFilename := range driveFilenames {
@@ -1748,6 +1759,7 @@ func syncHierarchyDown(drivePath string, localPath string,
 
 		err := syncFolderDown(filePath, driveFilename, file)
 		if err != nil {
+			nDownloadErrors++
 			fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
 		}
 	}
@@ -1781,6 +1793,7 @@ func syncHierarchyDown(drivePath string, localPath string,
 
 			err := syncFileDown(filePath, driveFilename, file, ignoreTimes)
 			if err != nil {
+				atomic.AddInt32(&nDownloadErrors, 1)
 				fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
 			}
 			fileBar.Increment()
@@ -1820,6 +1833,13 @@ func syncHierarchyDown(drivePath string, localPath string,
 	// And now wait for the workers to all return.
 	for i := 0; i < nWorkers; i++ {
 		<-doneChan
+	}
+
+	if nDownloadErrors == 0 {
+		return nil
+	} else {
+		return fmt.Errorf("%d files not downloaded due to errors",
+			nDownloadErrors)
 	}
 }
 
@@ -2292,7 +2312,7 @@ func upload() {
 	err := syncHierarchyUp(localPath, drivePath, existingFiles, encrypt,
 		ignoreTimes)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: error syncing %s: %v\n",
+		fmt.Fprintf(os.Stderr, "skicka: error uploading %s: %v\n",
 			localPath, err)
 	}
 
@@ -2332,8 +2352,16 @@ func download() {
 	fmt.Fprintf(os.Stderr, "Done. Starting download.\n")
 
 	syncStartTime = time.Now()
-	syncHierarchyDown(drivePath, localPath, existingFiles, ignoreTimes)
+	err := syncHierarchyDown(drivePath, localPath, existingFiles, ignoreTimes)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "skicka: error downloading %s: %v\n",
+			localPath, err)
+	}
+
 	printFinalStats()
+	if err != nil {
+		os.Exit(1)
+	}
 }
 
 func main() {
