@@ -86,6 +86,9 @@ var (
 			Ignored_Regexp         []string
 			Bytes_per_second_limit int
 		}
+		Download struct {
+			Bytes_per_second_limit int
+		}
 	}
 
 	// Various statistics gathered along the way. These all should be
@@ -102,6 +105,113 @@ var (
 
 	passphraseEnvironmentVariable = "SKICKA_PASSPHRASE"
 )
+
+///////////////////////////////////////////////////////////////////////////
+// Utility types
+
+type RetryHttpTransmitError struct {
+	StatusCode int
+	StatusBody string
+}
+
+func (r RetryHttpTransmitError) Error() string {
+	return fmt.Sprintf("http %d error (%s); retry", r.StatusCode, r.StatusBody)
+}
+
+// This is kind of a hack: FileCloser implements the io.ReadCloser
+// interface, wherein the Read() calls go to R, and the Close() call
+// goes to C.
+type FileCloser struct {
+	R io.Reader
+	C *os.File
+}
+
+func (fc *FileCloser) Read(b []byte) (int, error) {
+	return fc.R.Read(b)
+}
+
+func (fc *FileCloser) Close() error {
+	return fc.C.Close()
+}
+
+///////////////////////////////////////////////////////////////////////////
+// Bandwidth-limiting io.Reader
+
+type LimitedReader struct {
+	R io.Reader
+}
+
+var bandwidthBudgetMutex sync.Mutex
+
+// Maximum number of bytes of data that we are currently allowed to
+// upload given the bandwidth limits set by the user, if any.
+var bandwidthBudget int
+
+func launchBandwidthTask(bytesPerSecond int) {
+	if bytesPerSecond == 0 {
+		// no limit
+		return
+	}
+
+	go func() {
+		for {
+			bandwidthBudgetMutex.Lock()
+
+			// The 92/100 factor adds some slop to account for TCP/IP
+			// overhead in an effort to have our actual bandwidh used
+			// not exceed the desired limit.  Then, we release 1/8th of
+			// the per-second limit every 8th of a second.
+			bandwidthBudget += bytesPerSecond * 92 / 100 / 8
+			if bandwidthBudget > bytesPerSecond {
+				bandwidthBudget = bytesPerSecond
+			}
+
+			bandwidthBudgetMutex.Unlock()
+			time.Sleep(time.Duration(125) * time.Millisecond)
+		}
+	}()
+}
+
+func (lr LimitedReader) Read(dst []byte) (int, error) {
+	if config.Upload.Bytes_per_second_limit == 0 {
+		return lr.R.Read(dst)
+	}
+
+	for {
+		bandwidthBudgetMutex.Lock()
+		if bandwidthBudget > 0 {
+			break
+		}
+
+		// No further uploading is possible at the moment;
+		// sleep for a bit and then we'll try the loop
+		// again and see if we have better luck...
+		// TODO: we could also wait on a condition
+		// variable and wait to be signaled by the "add
+		// more available upload bytes" thread.
+		bandwidthBudgetMutex.Unlock()
+		time.Sleep(time.Duration(100) * time.Millisecond)
+	}
+
+	// The caller would like us to return this many bytes...
+	n := len(dst)
+
+	// but don't try to upload more than we're allowed to...
+	if n > bandwidthBudget {
+		n = bandwidthBudget
+	}
+
+	// It may turn out that the amount we read from the original
+	// io.Reader is less than expected
+	read, err := lr.R.Read(dst[:n])
+	bandwidthBudget -= read
+	if bandwidthBudget < 0 {
+		panic("budget")
+	}
+	bandwidthBudgetMutex.Unlock()
+
+	return read, err
+}
 
 ///////////////////////////////////////////////////////////////////////////
 // Small utility functions
@@ -257,29 +367,87 @@ func printFinalStats() {
 		fmtbytes(maxActiveBytes, false))
 }
 
+type HTTPResponseResult int
+
+const (
+	Success HTTPResponseResult = iota
+	Retry                      = iota
+	Fail                       = iota
+)
+
+const maxHTTPRetries = 6
+
+func handleHTTPResponse(resp *http.Response, err error, ntries int) HTTPResponseResult {
+	if err == nil && resp != nil && resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+		return Success
+	}
+
+	if ntries == maxHTTPRetries {
+		return Fail
+	}
+
+	if resp != nil && resp.StatusCode == 401 {
+		// After an hour, the OAuth2 token expires and needs to
+		// be refreshed.
+		if debug {
+			log.Printf("Trying OAuth2 token refresh.")
+		}
+		if err = oAuthTransport.Refresh(); err == nil {
+			// Success
+			return Retry
+		}
+		// Otherwise fall through to sleep
+	}
+
+	// 403, 500, and 503 error codes come up for
+	// for transient issues like hitting the rate limit
+	// of Drive SDK API calls, but sometimes we get
+	// other timeouts/connection resets here.
+	// Therefore, for all errors, we sleep (with exponential
+	// backoff) and try again a few times beffore
+	// giving up.
+	s := time.Duration(1<<uint(ntries))*time.Second +
+		time.Duration(mathrand.Int()%1000)*time.Millisecond
+	time.Sleep(s)
+	if debug {
+		if resp != nil {
+			log.Printf("Slept for %s due to %d error.\n", s.String(), resp.StatusCode)
+		} else {
+			log.Printf("Slept for %s due to %v.\n", s.String(), err)
+		}
+	}
+	return Retry
+}
+
 ///////////////////////////////////////////////////////////////////////////
 // Encryption/decryption
 
 // Encrypt the given plaintext using the given encryption key 'key' and
 // initialization vector 'iv'. The initialization vector should be 16 bytes
 // (the AES block-size), and should be randomly generated and unique for
-// each file that's encrypted. The input is encrypted in place.
-func encryptBytes(key []byte, iv []byte, plaintext []byte) {
+// each file that's encrypted.
+func encryptBytes(key []byte, iv []byte, plaintext []byte) []byte {
+	r, _ := ioutil.ReadAll(makeEncrypterReader(key, iv, bytes.NewReader(plaintext)))
+	return r
+}
+
+// Returns an io.Reader that encrypts the byte stream from the given io.Reader
+// using the given key and initialization vector.
+func makeEncrypterReader(key []byte, iv []byte, reader io.Reader) io.Reader {
 	if key == nil {
-		log.Fatalf("uninitialized key in encryptBytes()")
+		log.Fatalf("uninitialized key in makeEncrypterReader()")
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		log.Fatalf("Unable to create AES cypher: %v", err)
+		log.Fatalf("unable to create AES cypher: %v", err)
 	}
-
 	if len(iv) != aes.BlockSize {
 		log.Fatalf("IV length %d != aes.BlockSize %d\n", len(iv),
 			aes.BlockSize)
 	}
 
 	stream := cipher.NewCFBEncrypter(block, iv)
-	stream.XORKeyStream(plaintext, plaintext)
+	return &cipher.StreamReader{S: stream, R: reader}
 }
 
 // Decrypt the given cyphertext using the given encryption key and
@@ -346,13 +514,13 @@ func generateKey() {
 	// derived from the passphrase.
 	key := getRandomBytes(32)
 	iv := getRandomBytes(16)
-	encryptBytes(keyEncryptKey, iv, key)
+	encryptedKey := encryptBytes(keyEncryptKey, iv, key)
 
 	fmt.Printf("; Add the following lines to the [encryption] section\n")
 	fmt.Printf("; of your ~/.skicka.config file.\n")
 	fmt.Printf("\tsalt=%s\n", hex.EncodeToString(salt))
 	fmt.Printf("\tpassphrase-hash=%s\n", hex.EncodeToString(passHash))
-	fmt.Printf("\tencrypted-key=%s\n", hex.EncodeToString(key))
+	fmt.Printf("\tencrypted-key=%s\n", hex.EncodeToString(encryptedKey))
 	fmt.Printf("\tencrypted-key-iv=%s\n", hex.EncodeToString(iv))
 }
 
@@ -523,6 +691,10 @@ func insertNewDriveFile(f *drive.File) (*drive.File, error) {
 			}
 			return r, err
 		} else {
+			if debug {
+				log.Printf("Error %v trying to create drive file for %s. "+
+					"Deleting detrius...", err, f.Title)
+			}
 			deleteIncompleteDriveFiles(f.Title, f.Parents[0].Id)
 			err = tryToHandleDriveAPIError(err, ntries)
 			if err != nil {
@@ -731,15 +903,14 @@ func updateModificationTime(driveFile *drive.File, t time.Time) error {
 		f := &drive.File{ModifiedDate: t.UTC().Format(timeFormat)}
 		_, err := drivesvc.Files.Patch(driveFile.Id, f).SetModifiedDate(true).Do()
 		if err == nil {
-			return err
+			if debug {
+				log.Printf("success: updated modification time on %s\n", driveFile.Title)
+			}
+			return nil
 		} else if err = tryToHandleDriveAPIError(err, ntries); err != nil {
 			return err
 		}
 	}
-	if debug {
-		log.Printf("Updated modification time on %s\n", driveFile.Title)
-	}
-	return nil
 }
 
 func updatePermissions(driveFile *drive.File, mode os.FileMode) error {
@@ -793,108 +964,91 @@ func getPermissions(driveFile *drive.File) (os.FileMode, error) {
 	return os.FileMode(perm), err
 }
 
-type LimitedReader struct {
-	buf          []byte
-	offset       int
-	lastReadTime time.Time
-}
-
-var bandwidthBudgetMutex sync.Mutex
-
-// Maximum number of bytes of data that we are currently allowed to
-// upload given the bandwidth limits set by the user, if any.
-var uploadBudget int
-
-func (r *LimitedReader) Seek(offset int) error {
-	if offset > len(r.buf) {
-		return fmt.Errorf("Seek past end of buffer")
-	}
-	r.offset = offset
-	return nil
-}
-
-func (r *LimitedReader) Read(dst []byte) (int, error) {
-	if r.offset == len(r.buf) {
-		return 0, io.EOF
-	}
-
-	for {
-		n := len(dst)
-		if config.Upload.Bytes_per_second_limit > 0 {
-			bandwidthBudgetMutex.Lock()
-			if uploadBudget == 0 {
-				// No further uploading is possible at the moment;
-				// sleep for a bit and then we'll try the loop
-				// again and see if we have better luck...
-				// TODO: we could also wait on a condition
-				// variable and wait to be signaled by the "add
-				// more available upload bytes" thread.
-				bandwidthBudgetMutex.Unlock()
-				time.Sleep(time.Duration(100) * time.Millisecond)
-				continue
-			}
-			// Don't try to upload more than we're allowed to.
-			if n > uploadBudget {
-				n = uploadBudget
-			}
-			// And don't try to upload more data than is available!
-			if r.offset+n > len(r.buf) {
-				n = len(r.buf) - r.offset
-			}
-
-			uploadBudget -= n
-			if uploadBudget < 0 {
-				panic("budget")
-			}
-			bandwidthBudgetMutex.Unlock()
-		}
-
-		copy(dst, r.buf[r.offset:r.offset+n])
-		r.offset += n
-
-		return n, nil
-	}
-}
-
-func NewLimitedReader(c []byte) *LimitedReader {
-	return &LimitedReader{
-		buf: c,
-	}
-}
-
-// Upload the given file contents to the given *drive.File.
-func uploadFileContents(driveFile *drive.File, contents []byte) error {
+func prepareUploadPUT(driveFile *drive.File, contentsReader io.Reader,
+		length int64) (*http.Request, error) {
 	params := make(url.Values)
 	params.Set("uploadType", "media")
 
 	urls := "https://www.googleapis.com/upload/drive/v2/files/{fileId}"
 	urls += "?" + params.Encode()
 
-	for ntries := 0; ; ntries++ {
-		body := NewLimitedReader(contents)
-		req, _ := http.NewRequest("PUT", urls, body)
+	// Grab the start of the contents so that we can try to identify
+	// the content type.
+	contentsHeader := make([]byte, 512)
+	headerLength, err := contentsReader.Read(contentsHeader)
+	if err != nil {
+		return nil, err
+	}
+	contentType := http.DetectContentType(contentsHeader)
 
-		req.URL.Path = strings.Replace(req.URL.Path, "{fileId}", url.QueryEscape(driveFile.Id), 1)
-		googleapi.SetOpaque(req.URL)
-		req.ContentLength = int64(len(contents))
-		req.Header.Set("Content-Type", http.DetectContentType(contents))
-		req.Header.Set("User-Agent", "skicka/0.1")
+	// And reconstruct a new Reader that returns the same byte stream
+	// as the original one, effectively pasting the bytes we read for
+	// the content-type identification to the start of what remains in
+	// the original io.Reader.
+	contentsReader = io.MultiReader(bytes.NewReader(contentsHeader[:headerLength]),
+		contentsReader)
 
-		resp, err := oAuthTransport.RoundTrip(req)
-		if err == nil && resp.StatusCode >= 200 && resp.StatusCode <= 299 {
-			googleapi.CloseBody(resp)
-			return nil
-		} else if err = tryToHandleHTTPError(err, resp, ntries); err != nil {
-			return err
+	req, _ := http.NewRequest("PUT", urls, contentsReader)
+
+	req.URL.Path = strings.Replace(req.URL.Path, "{fileId}", url.QueryEscape(driveFile.Id), 1)
+	googleapi.SetOpaque(req.URL)
+	req.ContentLength = length
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("User-Agent", "skicka/0.1")
+
+	return req, nil
+}
+
+// Upload the file contents given by the io.Reader to the given *drive.File.
+func uploadFileContents(driveFile *drive.File, contentsReader io.Reader,
+	length int64, currentTry int) error {
+	// Limit upload bandwidth, if requested..
+	contentsReader = &LimitedReader{R: contentsReader}
+
+	// Get the PUT request for the upload.
+	req, err := prepareUploadPUT(driveFile, contentsReader, length)
+	if err != nil {
+		return err
+	}
+
+	// And send it off...
+	resp, err := oAuthTransport.RoundTrip(req)
+	if resp != nil {
+		defer googleapi.CloseBody(resp)
+	}
+
+	switch handleHTTPResponse(resp, err, currentTry) {
+	case Success:
+		if debug {
+			b, _ := ioutil.ReadAll(resp.Body)
+			log.Printf("Success for %s: code %d, body %s\n",
+				driveFile.Title, resp.StatusCode, b)
 		}
-		// Otherwise try again through the loop...
+		atomic.AddInt64(&stats.UploadBytes, length)
+		atomic.AddInt64(&stats.DriveFilesUpdated, 1)
+		return nil
+	case Fail:
+		if err == nil {
+			log.Fatalf("nil err but fail? resp %v", *resp)
+		}
+		return err
+	case Retry:
+		// Otherwise tell the caller to please set up the reader, etc.,
+		// again and retry...
+		if resp != nil {
+			b, _ := ioutil.ReadAll(resp.Body)
+			return RetryHttpTransmitError{StatusCode: resp.StatusCode,
+				StatusBody: string(b)}
+		} else {
+			return RetryHttpTransmitError{StatusCode: 500, StatusBody: err.Error()}
+		}
+	default:
+		panic("Unhandled HTTPResult value in switch")
 	}
 }
 
 // Get the contents of the *drive.File as an io.ReadCloser.
 func getDriveFileContentsReader(driveFile *drive.File) (io.ReadCloser, error) {
-	maxAPIRetries := 8
-
 	// The file download URL expires some hours after it's retrieved;
 	// re-grab the file right before downloading it so that we have a
 	// fresh URL.
@@ -904,49 +1058,22 @@ func getDriveFileContentsReader(driveFile *drive.File) (io.ReadCloser, error) {
 	}
 	url := driveFile.DownloadUrl
 
-	for ntries := 0; ntries < maxAPIRetries; ntries++ {
+	for ntries := 0; ; ntries++ {
 		request, err := http.NewRequest("GET", url, nil)
 		if err != nil {
 			return nil, err
 		}
+
 		resp, err := oAuthTransport.RoundTrip(request)
 
-		if err == nil {
+		switch handleHTTPResponse(resp, err, ntries) {
+		case Success:
 			return resp.Body, nil
-		} else if resp == nil {
+		case Fail:
 			return nil, err
-		} else {
-			if resp.StatusCode == 401 {
-				// After an hour, the OAuth2 token expires and needs to
-				// be refreshed.
-				if debug {
-					log.Printf("Trying OAuth2 token refresh.")
-				}
-				if err = oAuthTransport.Refresh(); err == nil {
-					// Success
-					continue
-				}
-				// Otherwise fall through to sleep
-			}
-
-			// 403, 500, and 503 error codes come up for
-			// for transient issues like hitting the rate limit
-			// of Drive SDK API calls, but sometimes we get
-			// other timeouts/connection resets here.
-			// Therefore, for all errors, we sleep (with exponential
-			// backoff) and try again a few times beffore
-			// giving up.
-			s := time.Duration(1<<uint(ntries))*time.Second +
-				time.Duration(mathrand.Int()%1000)*time.Millisecond
-			time.Sleep(s)
-			if debug {
-				log.Printf("Slept for %s due to %d error.\n",
-					s.String(), resp.StatusCode)
-			}
+		case Retry:
 		}
 	}
-	return nil, fmt.Errorf("%s: unable to download after %d tries", url,
-		maxAPIRetries)
 }
 
 // There are a number of cases where the Google Drive API returns an error
@@ -983,44 +1110,6 @@ func tryToHandleDriveAPIError(err error, ntries int) error {
 			}
 			// Otherwise fall through to sleep/backoff...
 		}
-	}
-
-	// Exponential backoff to handle rate-limit errors.
-	s := time.Duration(1<<uint(ntries))*time.Second +
-		time.Duration(mathrand.Int()%1000)*time.Millisecond
-	time.Sleep(s)
-	if debug {
-		log.Printf("Slept for %s due to %v error.\n", s.String(), err)
-	}
-	return nil
-}
-
-func tryToHandleHTTPError(err error, resp *http.Response, ntries int) error {
-	maxAPIRetries := 6
-	if debug {
-		if resp != nil {
-			b, _ := ioutil.ReadAll(resp.Body)
-			log.Printf("tryToHandleHTTPError: ntries %d resp %v (%s) error %T %+v\n",
-				ntries, resp.StatusCode, b, err, err)
-		} else {
-			log.Printf("tryToHandleHTTPError: ntries %d error %T %+v\n",
-				ntries, err, err)
-		}
-	}
-	if ntries == maxAPIRetries {
-		return err
-	}
-	if err == nil && resp.StatusCode == 401 {
-		// After an hour, the OAuth2 token expires and needs to
-		// be refreshed.
-		if debug {
-			log.Printf("Trying OAuth2 token refresh.")
-		}
-		if err := oAuthTransport.Refresh(); err == nil {
-			// Success
-			return nil
-		}
-		// Otherwise fall through to sleep/backoff...
 	}
 
 	// Exponential backoff to handle rate-limit errors.
@@ -1116,28 +1205,62 @@ func fileMetadataMatches(info os.FileInfo, encrypt bool,
 	return localTime.Equal(driveTime), nil
 }
 
-// Returns the contents of the given file, in a format suitable for upload:
-// specifically, if encryption is enabled, the contents are encrypted with the
-// given key and the initialization vector is prepended to the returned bytes.
-// Otherwise, the contents of the file are returned directly.
-func getFileContentsForUpload(path string, encrypt bool, iv []byte) ([]byte, error) {
-	contents, err := ioutil.ReadFile(path)
+// Return the md5 hash of the file at the given path in the form of a
+// string. If encryption is enabled, use the encrypted file contents when
+// computing the hash.
+func localFileMD5Contents(path string, encrypt bool, iv []byte) (string, error) {
+	contentsReader, _, err := getFileContentsReaderForUpload(path, encrypt, iv)
+	if contentsReader != nil {
+		defer contentsReader.Close()
+	}
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	atomic.AddInt64(&stats.DiskReadBytes, int64(len(contents)))
+	md5 := md5.New()
+	n, err := io.Copy(md5, contentsReader)
+	if err != nil {
+		return "", err
+	}
+	atomic.AddInt64(&stats.DiskReadBytes, n)
+
+	return fmt.Sprintf("%x", md5.Sum(nil)), nil
+}
+
+// Returns an io.ReadCloser for given file, such that the bytes read are
+// ready for upload: specifically, if encryption is enabled, the contents
+// are encrypted with the given key and the initialization vector is
+// prepended to the returned bytes. Otherwise, the contents of the file are
+// returned directly.
+func getFileContentsReaderForUpload(path string, encrypt bool,
+	iv []byte) (io.ReadCloser, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return f, 0, err
+	}
+
+	stat, err := os.Stat(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	fileSize := stat.Size()
 
 	if encrypt {
-		encryptBytes(key, iv, contents)
+		if key == nil {
+			key, err = decryptEncryptionKey()
+			if err != nil {
+				return nil, 0, err
+			}
+		}
+
+		r := makeEncrypterReader(key, iv, f)
 
 		// Prepend the initializaiton vector to the returned bytes.
-		encrypted := make([]byte, aes.BlockSize+len(contents))
-		copy(encrypted[:aes.BlockSize], iv[:aes.BlockSize])
-		copy(encrypted[aes.BlockSize:], contents)
-		return encrypted, nil
+		r = io.MultiReader(bytes.NewReader(iv[:aes.BlockSize]), r)
+
+		return &FileCloser{R: r, C: f}, fileSize + aes.BlockSize, nil
 	} else {
-		return contents, nil
+		return f, fileSize, nil
 	}
 }
 
@@ -1252,12 +1375,11 @@ func syncFileUp(file LocalFile, encrypt, ignoreTimes bool,
 		}
 	}
 
-	contents, err := getFileContentsForUpload(file.LocalPath, encrypt, iv)
+	md5contents, err := localFileMD5Contents(file.LocalPath, encrypt, iv)
 	if err != nil {
 		return err
 	}
 
-	md5contents := fmt.Sprintf("%x", md5.Sum(contents))
 	contentsMatch := md5contents == driveFile.Md5Checksum
 
 	if contentsMatch {
@@ -1283,18 +1405,35 @@ func syncFileUp(file LocalFile, encrypt, ignoreTimes bool,
 			"modification time and re-run skicka if you do want to" +
 			"update the file.")
 	} else {
-		err = uploadFileContents(driveFile, contents)
-		if err != nil {
-			return err
+		for ntries := 0; ntries < 5; ntries++ {
+			contentsReader, length, err :=
+				getFileContentsReaderForUpload(file.LocalPath, encrypt, iv)
+			if contentsReader != nil {
+				defer contentsReader.Close()
+			}
+			if err != nil {
+				return err
+			}
+
+			err = uploadFileContents(driveFile, contentsReader, length, ntries)
+			if err == nil {
+				// Success!
+				break
+			}
+
+			if re, ok := err.(RetryHttpTransmitError); ok {
+				if debug {
+					log.Printf("Got retry http error--retrying: %s", re.Error())
+				}
+			} else {
+				return err
+			}
 		}
+
 		if verbose {
 			log.Printf("Updated local %s -> Google Drive %s\n",
 				file.LocalPath, file.DrivePath)
 		}
-
-		atomic.AddInt64(&stats.UploadBytes, int64(len(contents)))
-		atomic.AddInt64(&stats.DriveFilesUpdated, 1)
-
 		return updateModificationTime(driveFile, file.FileInfo.ModTime())
 	}
 }
@@ -1314,26 +1453,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	// Kick off a background thread to periodically allow uploading
 	// a bit more data.  This allowance is consumed by the
 	// LimitedReader Read() function.
-	if config.Upload.Bytes_per_second_limit > 0 {
-		go func() {
-			for {
-				bandwidthBudgetMutex.Lock()
-
-				// The 92/100 factor adds some slop to account for TCP/IP
-				// overhead in an effort to have our actual bandwidh used
-				// not exceed the desired limit.  Then, we release 1/8th of
-				// the per-second limit every 8th of a second.
-				limit := config.Upload.Bytes_per_second_limit
-				uploadBudget += limit * 92 / 100 / 8
-				if uploadBudget > limit {
-					uploadBudget = limit
-				}
-
-				bandwidthBudgetMutex.Unlock()
-				time.Sleep(time.Duration(125) * time.Millisecond)
-			}
-		}()
-	}
+	launchBandwidthTask(config.Upload.Bytes_per_second_limit)
 
 	// Walk the local directory hierarchy starting at 'localPath' and build
 	// an array of files that may need to be synchronized.
@@ -1576,12 +1696,11 @@ func fileNeedsDownload(localPath string, drivePath string, driveFile *drive.File
 		}
 	}
 
-	contents, err := getFileContentsForUpload(localPath, encrypt, iv)
+	md5contents, err := localFileMD5Contents(localPath, encrypt, iv)
 	if err != nil {
-		return false, err
+		return true, err
 	}
 
-	md5contents := fmt.Sprintf("%x", md5.Sum(contents))
 	if ignoreTimes && md5contents != driveFile.Md5Checksum &&
 		stat.ModTime().After(driveModificationTime) == false {
 		fmt.Fprintf(os.Stderr, "skicka: warning: %s is older than "+
@@ -1660,11 +1779,16 @@ func syncFileDown(localPath string, driveFilename string, driveFile *drive.File,
 	}
 
 	// Otherwise go ahead and download the contents of the file from Drive.
-	contentsReader, err := getDriveFileContentsReader(driveFile)
-	defer contentsReader.Close()
+	driveContentsReader, err := getDriveFileContentsReader(driveFile)
+	if driveContentsReader != nil {
+		defer driveContentsReader.Close()
+	}
 	if err != nil {
 		return err
 	}
+
+	// Rate-limit the download, if required.
+	var contentsReader io.Reader = LimitedReader{R: driveContentsReader}
 
 	// Decrypt the contents, if they're encrypted.
 	if encrypted {
@@ -1687,7 +1811,7 @@ func syncFileDown(localPath string, driveFilename string, driveFile *drive.File,
 		// TODO: we should probably double check that the IV
 		// matches the one in the Drive metadata and fail hard if not...
 
-		contentsReader = ioutil.NopCloser(makeDecryptionReader(key, iv, contentsReader))
+		contentsReader = makeDecryptionReader(key, iv, contentsReader)
 	}
 
 	// Create or overwrite the local file.
@@ -1763,6 +1887,11 @@ func syncHierarchyDown(drivePath string, localPath string,
 			fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
 		}
 	}
+
+	// Kick off a background thread to periodically allow uploading
+	// a bit more data.  This allowance is consumed by the
+	// LimitedReader Read() function.
+	launchBandwidthTask(config.Download.Bytes_per_second_limit)
 
 	// Now do the files. Launch multiple workers to improve performance;
 	// we're more likely to have some workers actively downloading file
@@ -2074,11 +2203,13 @@ func cat() {
 	}
 
 	contentsReader, err := getDriveFileContentsReader(file)
+	if contentsReader != nil {
+		defer contentsReader.Close()
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", filename, err)
 		os.Exit(1)
 	}
-	defer contentsReader.Close()
 
 	_, err = io.Copy(os.Stdout, contentsReader)
 	if err != nil {
