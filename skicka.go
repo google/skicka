@@ -59,6 +59,8 @@ const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
 ///////////////////////////////////////////////////////////////////////////
 // Global Variables
 
+type debugging bool
+
 var (
 	oAuthTransport *oauth.Transport
 	drivesvc       *drive.Service
@@ -68,7 +70,8 @@ var (
 	// during 'download' or 'cat').
 	key []byte
 
-	verbose, debug bool
+	debug debugging
+        verbose debugging
 
 	// Configuration read in from the skicka config file.
 	config struct {
@@ -108,6 +111,12 @@ var (
 
 ///////////////////////////////////////////////////////////////////////////
 // Utility types
+
+func (d debugging) Printf(format string, args ...interface{}) {
+        if d {
+                log.Printf(format, args...)
+        }
+}
 
 // RetryHTTPTransmitError is a small struct to let us detect error cases
 // where the caller should retry the operation, as the error seems to be a
@@ -241,10 +250,7 @@ var lastTimeDelta = time.Now()
 // and the current call to timeDelta().
 func timeDelta(event string) {
 	now := time.Now()
-	if debug {
-		delta := now.Sub(lastTimeDelta)
-		log.Printf("Time [%s]: %s\n", event, delta.String())
-	}
+	debug.Printf("Time [%s]: %s", event, now.Sub(lastTimeDelta).String())
 	lastTimeDelta = now
 }
 
@@ -413,9 +419,7 @@ func handleHTTPResponse(resp *http.Response, err error, ntries int) HTTPResponse
 	if resp != nil && resp.StatusCode == 401 {
 		// After an hour, the OAuth2 token expires and needs to
 		// be refreshed.
-		if debug {
-			log.Printf("Trying OAuth2 token refresh.")
-		}
+		debug.Printf("Trying OAuth2 token refresh.")
 		if err = oAuthTransport.Refresh(); err == nil {
 			// Success
 			return Retry
@@ -431,12 +435,10 @@ func handleHTTPResponse(resp *http.Response, err error, ntries int) HTTPResponse
 	s := time.Duration(1<<uint(ntries))*time.Second +
 		time.Duration(mathrand.Int()%1000)*time.Millisecond
 	time.Sleep(s)
-	if debug {
-		if resp != nil {
-			log.Printf("Slept for %s due to %d error.\n", s.String(), resp.StatusCode)
-		} else {
-			log.Printf("Slept for %s due to %v.\n", s.String(), err)
-		}
+	if resp != nil {
+		debug.Printf("Slept for %s due to %d error.", s.String(), resp.StatusCode)
+	} else {
+		debug.Printf("Slept for %s due to %v.", s.String(), err)
 	}
 	return Retry
 }
@@ -674,10 +676,8 @@ func createMissingProperties(f *drive.File, mode os.FileMode, encrypt bool) erro
 				ivprop := new(drive.Property)
 				ivprop.Key = "IV"
 				ivprop.Value = ivhex
-				if debug {
-					log.Printf("Creating IV property for file %s, "+
+				debug.Printf("Creating IV property for file %s, "+
 						"which doesn't have one.", f.Title)
-				}
 				err := addProperty(ivprop, f)
 				if err != nil {
 					return err
@@ -689,10 +689,8 @@ func createMissingProperties(f *drive.File, mode os.FileMode, encrypt bool) erro
 		syncprop := new(drive.Property)
 		syncprop.Key = "Permissions"
 		syncprop.Value = fmt.Sprintf("%#o", mode&os.ModePerm)
-		if debug {
-			log.Printf("Creating Permissions property for file %s, "+
+		debug.Printf("Creating Permissions property for file %s, "+
 				"which doesn't have one.", f.Title)
-		}
 		err := addProperty(syncprop, f)
 		if err != nil {
 			return err
@@ -707,16 +705,12 @@ func insertNewDriveFile(f *drive.File) (*drive.File, error) {
 	for ntries := 0; ; ntries++ {
 		r, err := drivesvc.Files.Insert(f).Do()
 		if err == nil {
-			if debug {
-				log.Printf("Created new Google Drive file for %s: ID=%s\n",
-					f.Title, r.Id)
-			}
+			debug.Printf("Created new Google Drive file for %s: ID=%s",
+				f.Title, r.Id)
 			return r, err
 		}
-		if debug {
-			log.Printf("Error %v trying to create drive file for %s. "+
-				"Deleting detrius...", err, f.Title)
-		}
+		debug.Printf("Error %v trying to create drive file for %s. "+
+			"Deleting detrius...", err, f.Title)
 		deleteIncompleteDriveFiles(f.Title, f.Parents[0].Id)
 		err = tryToHandleDriveAPIError(err, ntries)
 		if err != nil {
@@ -753,9 +747,7 @@ func createDriveFile(filename string, mode os.FileMode, modTime time.Time, encry
 		ModifiedDate: modTime.UTC().Format(timeFormat),
 		Properties:   proplist,
 	}
-	if debug {
-		log.Printf("inserting %#v\n", f)
-	}
+	debug.Printf("inserting %#v", f)
 
 	return insertNewDriveFile(f)
 }
@@ -916,17 +908,13 @@ func getInitializationVector(driveFile *drive.File) ([]byte, error) {
 }
 
 func updateModificationTime(driveFile *drive.File, t time.Time) error {
-	if debug {
-		log.Printf("updating modification time of %s to %v\n",
-			driveFile.Title, t)
-	}
+	debug.Printf("updating modification time of %s to %v", driveFile.Title, t)
+
 	for ntries := 0; ; ntries++ {
 		f := &drive.File{ModifiedDate: t.UTC().Format(timeFormat)}
 		_, err := drivesvc.Files.Patch(driveFile.Id, f).SetModifiedDate(true).Do()
 		if err == nil {
-			if debug {
-				log.Printf("success: updated modification time on %s\n", driveFile.Title)
-			}
+			debug.Printf("success: updated modification time on %s", driveFile.Title)
 			return nil
 		} else if err = tryToHandleDriveAPIError(err, ntries); err != nil {
 			return err
@@ -1041,7 +1029,7 @@ func uploadFileContents(driveFile *drive.File, contentsReader io.Reader,
 	case Success:
 		if debug {
 			b, _ := ioutil.ReadAll(resp.Body)
-			log.Printf("Success for %s: code %d, body %s\n",
+			debug.Printf("Success for %s: code %d, body %s",
 				driveFile.Title, resp.StatusCode, b)
 		}
 		atomic.AddInt64(&stats.UploadBytes, length)
@@ -1107,11 +1095,10 @@ func getDriveFileContentsReader(driveFile *drive.File) (io.ReadCloser, error) {
 // should try the call again. For unrecoverable errors (or too many errors
 // in a row), it returns the error code back and the caller should stop trying.
 func tryToHandleDriveAPIError(err error, ntries int) error {
+	debug.Printf("tryToHandleDriveAPIError: ntries %d error %T %+v",
+		ntries, err, err)
+
 	maxAPIRetries := 6
-	if debug {
-		log.Printf("tryToHandleDriveAPIError: ntries %d error %T %+v\n",
-			ntries, err, err)
-	}
 	if ntries == maxAPIRetries {
 		return err
 	}
@@ -1120,9 +1107,7 @@ func tryToHandleDriveAPIError(err error, ntries int) error {
 		if err.Code == 401 {
 			// After an hour, the OAuth2 token expires and needs to
 			// be refreshed.
-			if debug {
-				log.Printf("Trying OAuth2 token refresh.")
-			}
+			debug.Printf("Trying OAuth2 token refresh.")
 			if err := oAuthTransport.Refresh(); err == nil {
 				// Success
 				return nil
@@ -1135,9 +1120,7 @@ func tryToHandleDriveAPIError(err error, ntries int) error {
 	s := time.Duration(1<<uint(ntries))*time.Second +
 		time.Duration(mathrand.Int()%1000)*time.Millisecond
 	time.Sleep(s)
-	if debug {
-		log.Printf("Slept for %s due to %v error.\n", s.String(), err)
-	}
+	debug.Printf("Slept for %s due to %v error.", s.String(), err)
 	return nil
 }
 
@@ -1218,9 +1201,7 @@ func fileMetadataMatches(info os.FileInfo, encrypt bool,
 	// modification time of the file the last time it was updated on Drive;
 	// if it is, we return false and an upload will be done..
 	localTime := info.ModTime()
-	if debug {
-		log.Printf("localTime: %v, driveTime: %v\n", localTime, driveTime)
-	}
+	debug.Printf("localTime: %v, driveTime: %v", localTime, driveTime)
 	return localTime.Equal(driveTime), nil
 }
 
@@ -1289,9 +1270,8 @@ func getFileContentsReaderForUpload(path string, encrypt bool,
 // appropriately.
 func syncFileUp(file LocalFile, encrypt, ignoreTimes bool,
 	existingDriveFiles map[string]*drive.File) error {
-	if debug {
-		log.Printf("syncFileUp: %#v\n", file.FileInfo)
-	}
+	debug.Printf("syncFileUp: %#v", file.FileInfo)
+
 	driveFile, ok := existingDriveFiles[file.DrivePath]
 	if ok {
 		// The file already exists on Drive; just make sure it has all
@@ -1336,10 +1316,8 @@ func syncFileUp(file LocalFile, encrypt, ignoreTimes bool,
 		if file.FileInfo.IsDir() {
 			driveFile, err = createDriveFolder(baseName,
 				file.FileInfo.Mode(), file.FileInfo.ModTime(), parentFile)
-			if verbose {
-				log.Printf("Created Google Drive folder %s\n",
-					file.DrivePath)
-			}
+			verbose.Printf("Created Google Drive folder %s", file.DrivePath)
+
 			// We actually only update the map when we create new folders;
 			// we don't update it for new files.  There are two reasons
 			// for this: first, once we've created a file, we don't
@@ -1404,9 +1382,7 @@ func syncFileUp(file LocalFile, encrypt, ignoreTimes bool,
 		// are unchanged versus what's on Drive, so just update the
 		// modified time on Drive so that we don't keep checking this
 		// file.
-		if debug {
-			log.Printf("contents match, timestamps do not")
-		}
+		debug.Printf("contents match, timestamps do not")
 		return updateModificationTime(driveFile, file.FileInfo.ModTime())
 	} else if metadataMatches == true {
 		// We're running with -ignore-times, the modification times
@@ -1439,18 +1415,14 @@ func syncFileUp(file LocalFile, encrypt, ignoreTimes bool,
 			}
 
 			if re, ok := err.(RetryHTTPTransmitError); ok {
-				if debug {
-					log.Printf("Got retry http error--retrying: %s", re.Error())
-				}
+				debug.Printf("Got retry http error--retrying: %s", re.Error())
 			} else {
 				return err
 			}
 		}
 
-		if verbose {
-			log.Printf("Updated local %s -> Google Drive %s\n",
-				file.LocalPath, file.DrivePath)
-		}
+		verbose.Printf("Updated local %s -> Google Drive %s", file.LocalPath,
+			file.DrivePath)
 		return updateModificationTime(driveFile, file.FileInfo.ModTime())
 	}
 }
@@ -1479,9 +1451,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	walkFuncCallback := func(path string, info os.FileInfo, patherr error) error {
 		path = filepath.Clean(path)
 		if patherr != nil {
-			if debug {
-				log.Printf("%s: %v\n", path, patherr)
-			}
+			debug.Printf("%s: %v", path, patherr)
 			return nil
 		}
 
@@ -1576,10 +1546,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 		for {
 			index := <-indexChan
 			if index < 0 {
-				if debug {
-					log.Printf("Worker got index %d; "+
-						"exiting\n", index)
-				}
+				debug.Printf("Worker got index %d; exiting", index)
 				doneChan <- 1
 				break
 			}
@@ -1682,10 +1649,7 @@ func fileNeedsDownload(localPath string, drivePath string, driveFile *drive.File
 
 	driveModificationTime, err := getModificationTime(driveFile)
 	if err != nil {
-		if debug {
-			log.Printf("unable to get modification time for %s: %v\n",
-				drivePath, err)
-		}
+		debug.Printf("unable to get modification time for %s: %v", drivePath, err)
 		return true, nil
 	}
 	if ignoreTimes == false {
@@ -1740,10 +1704,8 @@ func syncFolderDown(localPath string, driveFilename string, driveFile *drive.Fil
 			return fmt.Errorf("%s: is a regular file", localPath)
 		}
 	} else {
-		if verbose {
-			log.Printf("Creating directory %s for %s with permissions %#o\n",
+		verbose.Printf("Creating directory %s for %s with permissions %#o",
 				localPath, driveFilename, permissions)
-		}
 		return os.Mkdir(localPath, permissions)
 	}
 	return nil
@@ -1773,10 +1735,8 @@ func syncFileDown(localPath string, driveFilename string, driveFile *drive.File,
 		return err
 	}
 	if !needDownload {
-		if verbose {
-			log.Printf("Skipping download of %s (exists locally).\n",
-				driveFilename)
-		}
+		verbose.Printf("Skipping download of %s (exists locally).", driveFilename)
+
 		// Even if we don't update the file contents, make sure that
 		// the local permissions and modification time match the
 		// corresponding values stored in Drive.
@@ -1841,12 +1801,8 @@ func syncFileDown(localPath string, driveFilename string, driveFile *drive.File,
 		return err
 	}
 	atomic.AddInt64(&stats.DownloadBytes, contentsLength)
-	if debug {
-		log.Printf("Downloaded %d bytes for %s\n", contentsLength, localPath)
-	}
-	if verbose {
-		log.Printf("Wrote %d bytes to %s\n", contentsLength, localPath)
-	}
+	debug.Printf("Downloaded %d bytes for %s", contentsLength, localPath)
+	verbose.Printf("Wrote %d bytes to %s", contentsLength, localPath)
 
 	atomic.AddInt64(&stats.DiskWriteBytes, contentsLength)
 	atomic.AddInt64(&stats.LocalFilesUpdated, 1)
@@ -1920,10 +1876,7 @@ func syncHierarchyDown(drivePath string, localPath string,
 			// file we should process next.
 			index := <-indexChan
 			if index < 0 {
-				if debug {
-					log.Printf("Worker got index %d; "+
-						"exiting\n", index)
-				}
+				debug.Printf("Worker got index %d; exiting", index)
 				doneChan <- 1
 				break
 			}
@@ -2276,10 +2229,7 @@ func mkdir() {
 			// Otherwise, error time.
 			if index+1 == nDirs || makeIntermediate {
 				parent, err = createDriveFolder(dir, 0755, time.Now(), parent)
-				if debug {
-					log.Printf("Creating folder %s\n",
-						pathSoFar)
-				}
+				debug.Printf("Creating folder %s", pathSoFar)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "skicka: %s: %v\n",
 						pathSoFar, err)
@@ -2520,8 +2470,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	verbose = *vb || *dbg
-	debug = *dbg
+	verbose = debugging(*vb || *dbg)
+	debug = debugging(*dbg)
 
 	var err error
 	*configFilename, err = tildeExpand(*configFilename)
