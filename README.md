@@ -202,7 +202,7 @@ of attempts to retry the operation before giving up.
 It may be that skicka should make more attempts before giving up or that there are
 better error handling strategies; one trade-off is that if there is a
 serious error (like the internet connection is lost), then it's useful for
-the user to know this sonner rather than later.
+the user to know this sooner rather than later.
 
 If you do see these errors, re-run the operation you were performing; any
 files that weren't transferred the first time should be taken care of with
@@ -210,11 +210,14 @@ a second run.
 
 ###Does skicka support rate-limited uploads and downloads?
 
-There is now support for rate-limited uploads (and rate-limited downloads
-will come in time).  Add a line `bytes-per-second-limit=...` in the
-`[upload]` section of your `.skicka.config` file to specify a maximum
-number of bytes per second to transfer.  If this line isn't present (or has
-a value of zero), then upload bandwidth won't be limited.
+Yes. By default, skicka doesn't try to limit its bandwidth usage.  However,
+if you add a line `bytes-per-second-limit=...` to the `[upload]` or
+`[download]` section of your `.skicka.config` file, you can specify a
+maximum number of bytes per second to transfer for uploads or downloads,
+respectively.
+
+If this line isn't present (or has a value of zero), then bandwidth won't
+be limited.
 
 ###Can an http proxy be used with skicka?
 
@@ -230,17 +233,15 @@ Swedish, "to send".
 
 When a directory hierarchy is uploaded, Google Drive file is created for
 each local file and a Google Drive folder is created for each local
-directory. skicka uses a Google Drive file Property named
-"ModificationTime" to encode the last time skicka updated the file on
-Google Drive or confirmed that the local file and the Google Drive file
-were in sync.  This time encoded as a string storing int64 Unix nano time.
-The Unix file permissions of the file or directory are stored in a
-"Permissions" property, stored as a string with the octal file permissions.
+directory. skicka stores the time the local copy file was last modified in
+the "modifiedDate" Google Drive File resource.  The Unix file permissions
+of the file or directory are stored in using a custom "Permissions" file
+property, stored as a string with the octal file permissions.
 
 See the discussion of encryption below for details about how encrypted
 files are represented.
 
-###Synchronizaiton algorithm
+###Synchronization algorithm
 
 When deciding if a local file needs to be uploaded to Google Drive,
 skicka performs the following checks.
