@@ -109,16 +109,19 @@ var (
 ///////////////////////////////////////////////////////////////////////////
 // Utility types
 
-type RetryHttpTransmitError struct {
+// RetryHTTPTransmitError is a small struct to let us detect error cases
+// where the caller should retry the operation, as the error seems to be a
+// transient HTTP issue.
+type RetryHTTPTransmitError struct {
 	StatusCode int
 	StatusBody string
 }
 
-func (r RetryHttpTransmitError) Error() string {
+func (r RetryHTTPTransmitError) Error() string {
 	return fmt.Sprintf("http %d error (%s); retry", r.StatusCode, r.StatusBody)
 }
 
-// This is kind of a hack: FileCloser implements the io.ReadCloser
+// FileCloser is kind of a hack: it implements the io.ReadCloser
 // interface, wherein the Read() calls go to R, and the Close() call
 // goes to C.
 type FileCloser struct {
@@ -137,19 +140,19 @@ func (fc *FileCloser) Close() error {
 ///////////////////////////////////////////////////////////////////////////
 // Bandwidth-limiting io.Reader
 
-type LimitedReader struct {
-	R io.Reader
-}
-
-var bandwidthBudgetMutex sync.Mutex
-
 // Maximum number of bytes of data that we are currently allowed to
-// upload given the bandwidth limits set by the user, if any.
+// upload or download given the bandwidth limits set by the user, if any.
+// This value is reduced by the LimitedReader.Read() method when data is
+// uploaded or downloaded, and is periodically increased by the task
+// launched by launchBandwidthTask().
 var bandwidthBudget int
+
+// Mutex to protect bandwidthBudget.
+var bandwidthBudgetMutex sync.Mutex
 
 func launchBandwidthTask(bytesPerSecond int) {
 	if bytesPerSecond == 0 {
-		// no limit
+		// No limit, so no need to launch the task.
 		return
 	}
 
@@ -157,10 +160,10 @@ func launchBandwidthTask(bytesPerSecond int) {
 		for {
 			bandwidthBudgetMutex.Lock()
 
-			// The 92/100 factor adds some slop to account for TCP/IP
-			// overhead in an effort to have our actual bandwidh used
-			// not exceed the desired limit.  Then, we release 1/8th of
-			// the per-second limit every 8th of a second.
+			// Release 1/8th of the per-second limit every 8th of a second.
+			// The 92/100 factor in the amount released adds some slop to
+			// account for TCP/IP overhead in an effort to have the actual
+			// bandwidth used not exceed the desired limit.
 			bandwidthBudget += bytesPerSecond * 92 / 100 / 8
 			if bandwidthBudget > bytesPerSecond {
 				bandwidthBudget = bytesPerSecond
@@ -172,12 +175,23 @@ func launchBandwidthTask(bytesPerSecond int) {
 	}()
 }
 
+// LimitedReader is an io.Reader implementation that returns no more bytes
+// than the current value of bandwidthBudget.  Thus, as long as the upload and
+// download paths wrap the underlying io.Readers for local files and GETs
+// from Drive (respectively), then we should stay under the bandwidth per
+// second limit.
+type LimitedReader struct {
+	R io.Reader
+}
+
 func (lr LimitedReader) Read(dst []byte) (int, error) {
 	if config.Upload.Bytes_per_second_limit == 0 {
+		// No limit; go to town.
 		return lr.R.Read(dst)
 	}
 
 	for {
+		// Loop until some amount of bandwidth is available.
 		bandwidthBudgetMutex.Lock()
 		if bandwidthBudget > 0 {
 			break
@@ -201,8 +215,12 @@ func (lr LimitedReader) Read(dst []byte) (int, error) {
 		n = bandwidthBudget
 	}
 
-	// It may turn out that the amount we read from the original
-	// io.Reader is less than expected
+	// and it may turn out that the amount we read from the original
+	// io.Reader is less than expected, so reduce the budget by the
+	// amount actually read.
+	// TODO: is it better to relinquish the mutex during the read
+	// and then re-acquire it, so that we don't stall other workers
+	// while we're doing the actual read operation?
 	read, err := lr.R.Read(dst[:n])
 	bandwidthBudget -= read
 	if bandwidthBudget < 0 {
@@ -216,7 +234,7 @@ func (lr LimitedReader) Read(dst []byte) (int, error) {
 ///////////////////////////////////////////////////////////////////////////
 // Small utility functions
 
-var lastTimeDelta time.Time = time.Now()
+var lastTimeDelta = time.Now()
 
 // If debugging output is enabled, prints the elapsed time between the last
 // call to timeDelta() (or program start, if it hasn't been called before),
@@ -322,10 +340,10 @@ func fmtDuration(d time.Duration) string {
 }
 
 // A few values that printFinalStats() uses to do its work
-var startTime time.Time = time.Now()
+var startTime = time.Now()
 var syncStartTime time.Time
 var statsMutex sync.Mutex
-var lastStatsTime time.Time = time.Now()
+var lastStatsTime = time.Now()
 var lastStatsBytes int64
 var maxActiveBytes int64
 
@@ -377,6 +395,12 @@ const (
 
 const maxHTTPRetries = 6
 
+// We've gotten an *http.Response (maybe) and an error (maybe) back after
+// performing some HTTP operation; this function takes care of figuring
+// out if the operation succeeded, refreshes OAuth2 tokens if expiration
+// was the cause of the failure, takes care of exponential back-off for
+// transient errors, etc.  It then returns a HTTPResponseResult to the
+// caller, indicating how it should proceed.
 func handleHTTPResponse(resp *http.Response, err error, ntries int) HTTPResponseResult {
 	if err == nil && resp != nil && resp.StatusCode >= 200 && resp.StatusCode <= 299 {
 		return Success
@@ -399,12 +423,10 @@ func handleHTTPResponse(resp *http.Response, err error, ntries int) HTTPResponse
 		// Otherwise fall through to sleep
 	}
 
-	// 403, 500, and 503 error codes come up for
-	// for transient issues like hitting the rate limit
-	// of Drive SDK API calls, but sometimes we get
-	// other timeouts/connection resets here.
-	// Therefore, for all errors, we sleep (with exponential
-	// backoff) and try again a few times beffore
+	// 403, 500, and 503 error codes come up for transient issues like
+	// hitting the rate limit for Drive SDK API calls, but sometimes we get
+	// other timeouts/connection resets here. Therefore, for all errors, we
+	// sleep (with exponential  backoff) and try again a few times before
 	// giving up.
 	s := time.Duration(1<<uint(ntries))*time.Second +
 		time.Duration(mathrand.Int()%1000)*time.Millisecond
@@ -690,16 +712,15 @@ func insertNewDriveFile(f *drive.File) (*drive.File, error) {
 					f.Title, r.Id)
 			}
 			return r, err
-		} else {
-			if debug {
-				log.Printf("Error %v trying to create drive file for %s. "+
-					"Deleting detrius...", err, f.Title)
-			}
-			deleteIncompleteDriveFiles(f.Title, f.Parents[0].Id)
-			err = tryToHandleDriveAPIError(err, ntries)
-			if err != nil {
-				return nil, fmt.Errorf("unable to create drive.File: %v\n", err)
-			}
+		}
+		if debug {
+			log.Printf("Error %v trying to create drive file for %s. "+
+				"Deleting detrius...", err, f.Title)
+		}
+		deleteIncompleteDriveFiles(f.Title, f.Parents[0].Id)
+		err = tryToHandleDriveAPIError(err, ntries)
+		if err != nil {
+			return nil, fmt.Errorf("unable to create drive.File: %v\n", err)
 		}
 	}
 }
@@ -950,9 +971,8 @@ func updateProperty(driveFile *drive.File, name string, newValue string) error {
 func getModificationTime(driveFile *drive.File) (time.Time, error) {
 	if driveFile.ModifiedDate != "" {
 		return time.Parse(time.RFC3339Nano, driveFile.ModifiedDate)
-	} else {
-		return time.Unix(0, 0), nil
 	}
+	return time.Unix(0, 0), nil
 }
 
 func getPermissions(driveFile *drive.File) (os.FileMode, error) {
@@ -965,7 +985,7 @@ func getPermissions(driveFile *drive.File) (os.FileMode, error) {
 }
 
 func prepareUploadPUT(driveFile *drive.File, contentsReader io.Reader,
-		length int64) (*http.Request, error) {
+	length int64) (*http.Request, error) {
 	params := make(url.Values)
 	params.Set("uploadType", "media")
 
@@ -1037,11 +1057,10 @@ func uploadFileContents(driveFile *drive.File, contentsReader io.Reader,
 		// again and retry...
 		if resp != nil {
 			b, _ := ioutil.ReadAll(resp.Body)
-			return RetryHttpTransmitError{StatusCode: resp.StatusCode,
+			return RetryHTTPTransmitError{StatusCode: resp.StatusCode,
 				StatusBody: string(b)}
-		} else {
-			return RetryHttpTransmitError{StatusCode: 500, StatusBody: err.Error()}
 		}
+		return RetryHTTPTransmitError{StatusCode: 500, StatusBody: err.Error()}
 	default:
 		panic("Unhandled HTTPResult value in switch")
 	}
@@ -1140,8 +1159,8 @@ func createDriveClient(clientid, clientsecret, cacheFile string) error {
 
 	token, err := config.TokenCache.Token()
 	if err != nil {
-		authUrl := config.AuthCodeURL("state")
-		fmt.Printf("Go to the following link in your browser:\n%v\n", authUrl)
+		authURL := config.AuthCodeURL("state")
+		fmt.Printf("Go to the following link in your browser:\n%v\n", authURL)
 		fmt.Printf("Enter verification code: ")
 		var code string
 		fmt.Scanln(&code)
@@ -1259,9 +1278,8 @@ func getFileContentsReaderForUpload(path string, encrypt bool,
 		r = io.MultiReader(bytes.NewReader(iv[:aes.BlockSize]), r)
 
 		return &FileCloser{R: r, C: f}, fileSize + aes.BlockSize, nil
-	} else {
-		return f, fileSize, nil
 	}
+	return f, fileSize, nil
 }
 
 // Given a file on the local disk, synchronize it with Google Drive: if the
@@ -1353,9 +1371,8 @@ func syncFileUp(file LocalFile, encrypt, ignoreTimes bool,
 		}
 		if !t.Equal(file.FileInfo.ModTime()) {
 			return updateModificationTime(driveFile, file.FileInfo.ModTime())
-		} else {
-			return nil
 		}
+		return nil
 	}
 
 	metadataMatches, err := fileMetadataMatches(file.FileInfo, encrypt,
@@ -1421,7 +1438,7 @@ func syncFileUp(file LocalFile, encrypt, ignoreTimes bool,
 				break
 			}
 
-			if re, ok := err.(RetryHttpTransmitError); ok {
+			if re, ok := err.(RetryHTTPTransmitError); ok {
 				if debug {
 					log.Printf("Got retry http error--retrying: %s", re.Error())
 				}
@@ -1457,7 +1474,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 
 	// Walk the local directory hierarchy starting at 'localPath' and build
 	// an array of files that may need to be synchronized.
-	var localFiles []LocalFile = nil
+	var localFiles []LocalFile
 
 	walkFuncCallback := func(path string, info os.FileInfo, patherr error) error {
 		path = filepath.Clean(path)
@@ -1606,10 +1623,8 @@ func syncHierarchyUp(localPath string, driveRoot string,
 
 	if nUploadErrors == 0 {
 		return nil
-	} else {
-		return fmt.Errorf("%d files not uploaded due to errors",
-			nUploadErrors)
 	}
+	return fmt.Errorf("%d files not uploaded due to errors", nUploadErrors)
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -1624,10 +1639,9 @@ func isEncrypted(file *drive.File) (bool, error) {
 	if _, err := getProperty(file, "IV"); err == nil {
 		if strings.HasSuffix(file.Title, ".aes256") {
 			return true, nil
-		} else {
-			return false, fmt.Errorf("has IV property but doesn't " +
-				"end with .aes256 suffix")
 		}
+		return false, fmt.Errorf("has IV property but doesn't " +
+			"end with .aes256 suffix")
 	} else if strings.HasSuffix(file.Title, ".aes256") {
 		// This could actually happen with an interrupted upload
 		// with 403 errors and the case where a file is created
@@ -1635,9 +1649,8 @@ func isEncrypted(file *drive.File) (bool, error) {
 		// the file before exiting...
 		return false, fmt.Errorf("ends with .aes256 suffix but doesn't " +
 			"have IV property")
-	} else {
-		return false, nil
 	}
+	return false, nil
 }
 
 // Checks to see if it's necessary to download the given *drive.File in order
@@ -1843,9 +1856,8 @@ func syncFileDown(localPath string, driveFilename string, driveFile *drive.File,
 	// uploaded to Google Drive.
 	if modifiedTime, err := getModificationTime(driveFile); err == nil {
 		return os.Chtimes(localPath, modifiedTime, modifiedTime)
-	} else {
-		return err
 	}
+	return err
 }
 
 // Download the full hierarchy of files from Google Drive starting at
@@ -1853,7 +1865,7 @@ func syncFileDown(localPath string, driveFilename string, driveFile *drive.File,
 func syncHierarchyDown(drivePath string, localPath string,
 	existingFiles map[string]*drive.File, ignoreTimes bool) error {
 	var driveFilenames []string
-	for name, _ := range existingFiles {
+	for name := range existingFiles {
 		driveFilenames = append(driveFilenames, name)
 	}
 	sort.Strings(driveFilenames)
@@ -1966,10 +1978,8 @@ func syncHierarchyDown(drivePath string, localPath string,
 
 	if nDownloadErrors == 0 {
 		return nil
-	} else {
-		return fmt.Errorf("%d files not downloaded due to errors",
-			nDownloadErrors)
 	}
+	return fmt.Errorf("%d files not downloaded due to errors", nDownloadErrors)
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -2353,7 +2363,7 @@ func ls() {
 		mustExist)
 
 	var filenames []string
-	for f, _ := range existingFiles {
+	for f := range existingFiles {
 		filenames = append(filenames, f)
 	}
 	sort.Strings(filenames)
