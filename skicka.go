@@ -70,8 +70,8 @@ var (
 	// during 'download' or 'cat').
 	key []byte
 
-	debug debugging
-        verbose debugging
+	debug   debugging
+	verbose debugging
 
 	// Configuration read in from the skicka config file.
 	config struct {
@@ -113,9 +113,9 @@ var (
 // Utility types
 
 func (d debugging) Printf(format string, args ...interface{}) {
-        if d {
-                log.Printf(format, args...)
-        }
+	if d {
+		log.Printf(format, args...)
+	}
 }
 
 // RetryHTTPTransmitError is a small struct to let us detect error cases
@@ -194,14 +194,12 @@ type LimitedReader struct {
 }
 
 func (lr LimitedReader) Read(dst []byte) (int, error) {
-	if config.Upload.Bytes_per_second_limit == 0 {
-		// No limit; go to town.
-		return lr.R.Read(dst)
-	}
-
+	// Loop until some amount of bandwidth is available.
 	for {
-		// Loop until some amount of bandwidth is available.
 		bandwidthBudgetMutex.Lock()
+		if bandwidthBudget < 0 {
+			panic("bandwidth budget went negative")
+		}
 		if bandwidthBudget > 0 {
 			break
 		}
@@ -216,7 +214,7 @@ func (lr LimitedReader) Read(dst []byte) (int, error) {
 		time.Sleep(time.Duration(100) * time.Millisecond)
 	}
 
-	// The caller would like us to return this many bytes...
+	// The caller would like us to return up to this many bytes...
 	n := len(dst)
 
 	// but don't try to upload more than we're allowed to...
@@ -224,18 +222,20 @@ func (lr LimitedReader) Read(dst []byte) (int, error) {
 		n = bandwidthBudget
 	}
 
-	// and it may turn out that the amount we read from the original
-	// io.Reader is less than expected, so reduce the budget by the
-	// amount actually read.
-	// TODO: is it better to relinquish the mutex during the read
-	// and then re-acquire it, so that we don't stall other workers
-	// while we're doing the actual read operation?
-	read, err := lr.R.Read(dst[:n])
-	bandwidthBudget -= read
-	if bandwidthBudget < 0 {
-		panic("budget")
-	}
+	// Update the budget for the maximum amount of what we may consume and
+	// relinquish the lock so that other workers can claim bandwidth.
+	bandwidthBudget -= n
 	bandwidthBudgetMutex.Unlock()
+
+	read, err := lr.R.Read(dst[:n])
+	if read < n {
+		// It may turn out that the amount we read from the original
+		// io.Reader is less than the caller asked for; in this case,
+		// we give back the bandwidth that we reserved but didn't use.
+		bandwidthBudgetMutex.Lock()
+		bandwidthBudget += n - read
+		bandwidthBudgetMutex.Unlock()
+	}
 
 	return read, err
 }
@@ -677,7 +677,7 @@ func createMissingProperties(f *drive.File, mode os.FileMode, encrypt bool) erro
 				ivprop.Key = "IV"
 				ivprop.Value = ivhex
 				debug.Printf("Creating IV property for file %s, "+
-						"which doesn't have one.", f.Title)
+					"which doesn't have one.", f.Title)
 				err := addProperty(ivprop, f)
 				if err != nil {
 					return err
@@ -690,7 +690,7 @@ func createMissingProperties(f *drive.File, mode os.FileMode, encrypt bool) erro
 		syncprop.Key = "Permissions"
 		syncprop.Value = fmt.Sprintf("%#o", mode&os.ModePerm)
 		debug.Printf("Creating Permissions property for file %s, "+
-				"which doesn't have one.", f.Title)
+			"which doesn't have one.", f.Title)
 		err := addProperty(syncprop, f)
 		if err != nil {
 			return err
@@ -1011,7 +1011,9 @@ func prepareUploadPUT(driveFile *drive.File, contentsReader io.Reader,
 func uploadFileContents(driveFile *drive.File, contentsReader io.Reader,
 	length int64, currentTry int) error {
 	// Limit upload bandwidth, if requested..
-	contentsReader = &LimitedReader{R: contentsReader}
+	if config.Upload.Bytes_per_second_limit > 0 {
+		contentsReader = &LimitedReader{R: contentsReader}
+	}
 
 	// Get the PUT request for the upload.
 	req, err := prepareUploadPUT(driveFile, contentsReader, length)
@@ -1705,7 +1707,7 @@ func syncFolderDown(localPath string, driveFilename string, driveFile *drive.Fil
 		}
 	} else {
 		verbose.Printf("Creating directory %s for %s with permissions %#o",
-				localPath, driveFilename, permissions)
+			localPath, driveFilename, permissions)
 		return os.Mkdir(localPath, permissions)
 	}
 	return nil
@@ -1761,7 +1763,10 @@ func syncFileDown(localPath string, driveFilename string, driveFile *drive.File,
 	}
 
 	// Rate-limit the download, if required.
-	var contentsReader io.Reader = LimitedReader{R: driveContentsReader}
+	var contentsReader io.Reader = driveContentsReader
+	if config.Download.Bytes_per_second_limit > 0 {
+		contentsReader = LimitedReader{R: driveContentsReader}
+	}
 
 	// Decrypt the contents, if they're encrypted.
 	if encrypted {
