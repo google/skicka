@@ -1908,6 +1908,10 @@ func syncHierarchyDown(drivePath string, localPath string,
 			nFiles++
 		}
 	}
+	if nFiles == 0 {
+		return nil
+	}
+
 	fileBar = pb.StartNew(nFiles)
 	fileBar.ShowBar = true
 	fileBar.Output = os.Stderr
