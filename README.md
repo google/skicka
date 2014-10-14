@@ -96,7 +96,7 @@ option.  skicka looks for your encryption passphrase in the
 `SKICKA_PASSPHRASE` environment variable; thus, you might use:
 
 ```
-% env SKICKA_PASSPHRASE=mySecretPassphrase skicka -encrypt=true upload ~/Pictures /EncryptedPictures
+% env SKICKA_PASSPHRASE=mySecretPassphrase skicka upload -encrypt ~/Pictures /EncryptedPictures
 ```
 
 To download a directory hierarchy from Google Drive to your local disk, use
