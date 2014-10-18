@@ -1699,7 +1699,7 @@ func fileNeedsDownload(localPath string, drivePath string, driveFile *drive.File
 }
 
 // Create (or update the permissions) of the local directory corresponding to
-// the gien drive folder.
+// the given drive folder.
 func syncFolderDown(localPath string, driveFilename string, driveFile *drive.File) error {
 	permissions, err := getPermissions(driveFile)
 	if err != nil {
@@ -1839,14 +1839,9 @@ func syncHierarchyDown(drivePath string, localPath string,
 	}
 	sort.Strings(driveFilenames)
 
-	// Both drivePath and localPath must be directories.
-	if len(existingFiles) == 1 && !isFolder(existingFiles[driveFilenames[0]]) {
-		fmt.Fprintf(os.Stderr, "skicka: %s: not a directory\n",
-			driveFilenames[0])
-		os.Exit(1)
-	}
-	if stat, err := os.Stat(localPath); err == nil && !stat.IsDir() {
-		fmt.Fprintf(os.Stderr, "skicka: %s: not a directory\n",
+	// Both drivePath and localPath must be directories, or both must be files.
+	if stat, err := os.Stat(localPath); err == nil && len(existingFiles) == 1 && stat.IsDir() != isFolder(existingFiles[driveFilenames[0]]) {
+		fmt.Fprintf(os.Stderr, "skicka: %s: remote and local must both be directory or both be files.\n",
 			localPath)
 		os.Exit(1)
 	}
@@ -1896,7 +1891,11 @@ func syncHierarchyDown(drivePath string, localPath string,
 
 			driveFilename := driveFilenames[index]
 			file := existingFiles[driveFilename]
-			filePath := localPath + "/" + driveFilename[len(drivePath):]
+			filePath := localPath
+			if len(driveFilename) > len(drivePath) {
+				// If the Drive path is more than a single file.
+				filePath += "/" + driveFilename[len(drivePath):]
+			}
 
 			err := syncFileDown(filePath, driveFilename, file, ignoreTimes)
 			if err != nil {
