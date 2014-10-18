@@ -1490,7 +1490,15 @@ func syncHierarchyUp(localPath string, driveRoot string,
 		return nil
 	}
 
-	err := filepath.Walk(localPath, walkFuncCallback)
+	info, err := os.Stat(localPath)
+	if err == nil {
+		if !info.IsDir() {
+			err = walkFuncCallback(localPath, info, err)
+		} else {
+			err = filepath.Walk(localPath, walkFuncCallback)
+		}
+	}
+
 	timeDelta("Walk local directories")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "skicka: error getting files to sync: %v\n",
@@ -2392,11 +2400,8 @@ func upload() {
 	drivePath := filepath.Clean(flag.Arg(i + 1))
 
 	// Make sure localPath exists and is a directory.
-	if info, err := os.Stat(localPath); err != nil {
+	if _, err := os.Stat(localPath); err != nil {
 		fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
-		os.Exit(1)
-	} else if !info.IsDir() {
-		fmt.Fprintf(os.Stderr, "skicka: %s: not a directory\n", localPath)
 		os.Exit(1)
 	}
 
