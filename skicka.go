@@ -151,7 +151,7 @@ func (fc *FileCloser) Close() error {
 
 // Maximum number of bytes of data that we are currently allowed to
 // upload or download given the bandwidth limits set by the user, if any.
-// This value is reduced by the LimitedReader.Read() method when data is
+// This value is reduced by the RateLimitedReader.Read() method when data is
 // uploaded or downloaded, and is periodically increased by the task
 // launched by launchBandwidthTask().
 var bandwidthBudget int
@@ -184,16 +184,16 @@ func launchBandwidthTask(bytesPerSecond int) {
 	}()
 }
 
-// LimitedReader is an io.Reader implementation that returns no more bytes
+// RateLimitedReader is an io.Reader implementation that returns no more bytes
 // than the current value of bandwidthBudget.  Thus, as long as the upload and
 // download paths wrap the underlying io.Readers for local files and GETs
 // from Drive (respectively), then we should stay under the bandwidth per
 // second limit.
-type LimitedReader struct {
+type RateLimitedReader struct {
 	R io.Reader
 }
 
-func (lr LimitedReader) Read(dst []byte) (int, error) {
+func (lr RateLimitedReader) Read(dst []byte) (int, error) {
 	// Loop until some amount of bandwidth is available.
 	for {
 		bandwidthBudgetMutex.Lock()
@@ -1012,7 +1012,7 @@ func uploadFileContents(driveFile *drive.File, contentsReader io.Reader,
 	length int64, currentTry int) error {
 	// Limit upload bandwidth, if requested..
 	if config.Upload.Bytes_per_second_limit > 0 {
-		contentsReader = &LimitedReader{R: contentsReader}
+		contentsReader = &RateLimitedReader{R: contentsReader}
 	}
 
 	// Get the PUT request for the upload.
@@ -1443,7 +1443,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 
 	// Kick off a background thread to periodically allow uploading
 	// a bit more data.  This allowance is consumed by the
-	// LimitedReader Read() function.
+	// RateLimitedReader Read() function.
 	launchBandwidthTask(config.Upload.Bytes_per_second_limit)
 
 	// Walk the local directory hierarchy starting at 'localPath' and build
@@ -1773,7 +1773,7 @@ func syncFileDown(localPath string, driveFilename string, driveFile *drive.File,
 	// Rate-limit the download, if required.
 	var contentsReader io.Reader = driveContentsReader
 	if config.Download.Bytes_per_second_limit > 0 {
-		contentsReader = LimitedReader{R: driveContentsReader}
+		contentsReader = RateLimitedReader{R: driveContentsReader}
 	}
 
 	// Decrypt the contents, if they're encrypted.
@@ -1866,7 +1866,7 @@ func syncHierarchyDown(drivePath string, localPath string,
 
 	// Kick off a background thread to periodically allow uploading
 	// a bit more data.  This allowance is consumed by the
-	// LimitedReader Read() function.
+	// RateLimitedReader Read() function.
 	launchBandwidthTask(config.Download.Bytes_per_second_limit)
 
 	// Now do the files. Launch multiple workers to improve performance;
