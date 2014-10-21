@@ -391,6 +391,17 @@ func printFinalStats() {
 		fmtbytes(maxActiveBytes, false))
 }
 
+func exponentialBackoff(ntries int, resp *http.Response, err error) {
+	s := time.Duration(1<<uint(ntries))*time.Second +
+		time.Duration(mathrand.Int()%1000)*time.Millisecond
+	time.Sleep(s)
+	if resp != nil {
+		debug.Printf("exponential backoff: slept for resp %d...", resp.StatusCode)
+	} else {
+		debug.Printf("exponential backoff: slept for error %v...", err)
+	}
+}
+
 type HTTPResponseResult int
 
 const (
@@ -432,14 +443,7 @@ func handleHTTPResponse(resp *http.Response, err error, ntries int) HTTPResponse
 	// other timeouts/connection resets here. Therefore, for all errors, we
 	// sleep (with exponential  backoff) and try again a few times before
 	// giving up.
-	s := time.Duration(1<<uint(ntries))*time.Second +
-		time.Duration(mathrand.Int()%1000)*time.Millisecond
-	time.Sleep(s)
-	if resp != nil {
-		debug.Printf("Slept for %s due to %d error.", s.String(), resp.StatusCode)
-	} else {
-		debug.Printf("Slept for %s due to %v.", s.String(), err)
-	}
+	exponentialBackoff(ntries, resp, err)
 	return Retry
 }
 
@@ -1118,11 +1122,7 @@ func tryToHandleDriveAPIError(err error, ntries int) error {
 		}
 	}
 
-	// Exponential backoff to handle rate-limit errors.
-	s := time.Duration(1<<uint(ntries))*time.Second +
-		time.Duration(mathrand.Int()%1000)*time.Millisecond
-	time.Sleep(s)
-	debug.Printf("Slept for %s due to %v error.", s.String(), err)
+	exponentialBackoff(ntries, nil, err)
 	return nil
 }
 
