@@ -1417,7 +1417,8 @@ func syncFileUp(file LocalFile, encrypt, ignoreTimes bool,
 			}
 
 			if re, ok := err.(RetryHTTPTransmitError); ok {
-				debug.Printf("Got retry http error--retrying: %s", re.Error())
+				debug.Printf("%s: got retry http error--retrying: %s",
+					file.LocalPath, re.Error())
 			} else {
 				return err
 			}
