@@ -2360,7 +2360,7 @@ func ls() {
 						fmt.Printf("%s: %s, ", prop.Key,
 							prop.Value)
 					}
-					fmt.Printf("]\n")
+					fmt.Printf("id: %s ]\n", file.Id)
 				}
 			} else {
 				fmt.Printf("%s  %s  %s  %s\n", permString,
