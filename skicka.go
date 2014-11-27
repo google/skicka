@@ -255,7 +255,7 @@ func timeDelta(event string) {
 }
 
 // If the given path starts with a tilde, performs shell glob expansion
-// to convert it to the path to a home directory. Otherwise returns the
+// to convert it to the path of the home directory. Otherwise returns the
 // path unchanged.
 func tildeExpand(path string) (string, error) {
 	path = filepath.Clean(path)
@@ -475,7 +475,7 @@ func makeEncrypterReader(key []byte, iv []byte, reader io.Reader) io.Reader {
 }
 
 // Decrypt the given cyphertext using the given encryption key and
-// initialiazaion vector 'iv'.
+// initialization vector 'iv'.
 func decryptBytes(key []byte, iv []byte, ciphertext []byte) []byte {
 	r, _ := ioutil.ReadAll(makeDecryptionReader(key, iv, bytes.NewReader(ciphertext)))
 	return r
@@ -1257,7 +1257,7 @@ func getFileContentsReaderForUpload(path string, encrypt bool,
 
 		r := makeEncrypterReader(key, iv, f)
 
-		// Prepend the initializaiton vector to the returned bytes.
+		// Prepend the initialization vector to the returned bytes.
 		r = io.MultiReader(bytes.NewReader(iv[:aes.BlockSize]), r)
 
 		return &FileCloser{R: r, C: f}, fileSize + aes.BlockSize, nil
@@ -2010,7 +2010,7 @@ func checkEncryptionConfig(value string, name string, bytes int) int {
 
 // Check that the configuration read from the config file isn't obviously
 // missing needed entries so that we can give better error messages at startup
-// while folks are dirst getting things setup.
+// while folks are first getting things setup.
 func checkConfigValidity() {
 	nerrs := 0
 	if config.Google.ClientId == "" ||
