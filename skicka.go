@@ -2475,7 +2475,7 @@ func main() {
 		"Configuration file")
 	vb := flag.Bool("verbose", false, "Enable verbose output")
 	dbg := flag.Bool("debug", false, "Enable debugging output")
-
+	flag.Usage = usage
 	flag.Parse()
 
 	if len(flag.Args()) == 0 {
@@ -2504,7 +2504,7 @@ func main() {
 	case "init":
 		createConfigFile(*configFilename)
 		return
-	case "help", "-h", "-help", "--help":
+	case "help":
 		usage()
 		return
 	}
