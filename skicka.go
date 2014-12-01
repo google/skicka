@@ -2150,9 +2150,12 @@ func du() {
 		if isFolder(f) {
 			dirNames = append(dirNames, name)
 		} else {
-			dirName := filepath.Clean(filepath.Dir(name))
-			folderSize[dirName] += f.FileSize
 			totalSize += f.FileSize
+			dirName := filepath.Clean(filepath.Dir(name))
+			for ; dirName != "/"; dirName = filepath.Dir(dirName) {
+				folderSize[dirName] += f.FileSize
+			}
+			folderSize["/"] += f.FileSize
 		}
 	}
 
