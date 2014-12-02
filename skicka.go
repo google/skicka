@@ -1722,46 +1722,8 @@ func syncFolderDown(localPath string, driveFilename string, driveFile *drive.Fil
 }
 
 // Sync the given file from Google Drive to the local filesystem.
-func syncFileDown(localPath string, driveFilename string, driveFile *drive.File,
-	ignoreTimes bool) error {
-	encrypted, err := isEncrypted(driveFile)
-	if err != nil {
-		return err
-	}
-	if encrypted {
-		localPath = strings.TrimSuffix(localPath, ".aes256")
-	}
+func downloadDriveFile(writer io.Writer, driveFile *drive.File) error {
 
-	permissions, err := getPermissions(driveFile)
-	if err != nil {
-		permissions = 0644
-	}
-
-	// See if the file exists locally and matches the file on Google Drive;
-	// if so, skip the download.
-	needDownload, err := fileNeedsDownload(localPath, driveFilename, driveFile,
-		ignoreTimes)
-	if err != nil {
-		return err
-	}
-	if !needDownload {
-		verbose.Printf("Skipping download of %s (exists locally).", driveFilename)
-
-		// Even if we don't update the file contents, make sure that
-		// the local permissions and modification time match the
-		// corresponding values stored in Drive.
-		modifiedTime, err := getModificationTime(driveFile)
-		if err != nil {
-			return err
-		}
-		err = os.Chtimes(localPath, modifiedTime, modifiedTime)
-		if err != nil {
-			return err
-		}
-		return os.Chmod(localPath, permissions)
-	}
-
-	// Otherwise go ahead and download the contents of the file from Drive.
 	driveContentsReader, err := getDriveFileContentsReader(driveFile)
 	if driveContentsReader != nil {
 		defer driveContentsReader.Close()
@@ -1776,6 +1738,10 @@ func syncFileDown(localPath string, driveFilename string, driveFile *drive.File,
 		contentsReader = LimitedReader{R: driveContentsReader}
 	}
 
+	encrypted, err := isEncrypted(driveFile)
+	if err != nil {
+		return err
+	}
 	// Decrypt the contents, if they're encrypted.
 	if encrypted {
 		if key == nil {
@@ -1796,71 +1762,66 @@ func syncFileDown(localPath string, driveFilename string, driveFile *drive.File,
 		}
 		// TODO: we should probably double check that the IV
 		// matches the one in the Drive metadata and fail hard if not...
-
 		contentsReader = makeDecryptionReader(key, iv, contentsReader)
 	}
 
-	// Create or overwrite the local file.
-	f, err := os.Create(localPath)
+	contentsLength, err := io.Copy(writer, contentsReader)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
-	f.Chmod(permissions)
-
-	contentsLength, err := io.Copy(f, contentsReader)
-	if err != nil {
-		return err
-	}
 	atomic.AddInt64(&stats.DownloadBytes, contentsLength)
-	debug.Printf("Downloaded %d bytes for %s", contentsLength, localPath)
-	verbose.Printf("Wrote %d bytes to %s", contentsLength, localPath)
-
 	atomic.AddInt64(&stats.DiskWriteBytes, contentsLength)
 	atomic.AddInt64(&stats.LocalFilesUpdated, 1)
-
-	// Set the last access and modification time of the newly-created
-	// file to match the modification time of the original file that was
-	// uploaded to Google Drive.
-	if modifiedTime, err := getModificationTime(driveFile); err == nil {
-		return os.Chtimes(localPath, modifiedTime, modifiedTime)
-	}
-	return err
+	return nil
 }
 
 // Download the full hierarchy of files from Google Drive starting at
 // 'driveRoot', recreating it at 'localPath'.
 func syncHierarchyDown(drivePath string, localPath string,
-	existingFiles map[string]*drive.File, ignoreTimes bool) error {
+	filesOnDrive map[string]*drive.File, ignoreTimes bool) error {
 	var driveFilenames []string
-	for name := range existingFiles {
+	for name := range filesOnDrive {
 		driveFilenames = append(driveFilenames, name)
 	}
 	sort.Strings(driveFilenames)
 
 	// Both drivePath and localPath must be directories, or both must be files.
-	if stat, err := os.Stat(localPath); err == nil && len(existingFiles) == 1 && stat.IsDir() != isFolder(existingFiles[driveFilenames[0]]) {
+	if stat, err := os.Stat(localPath); err == nil && len(filesOnDrive) == 1 &&
+		stat.IsDir() != isFolder(filesOnDrive[driveFilenames[0]]) {
 		fmt.Fprintf(os.Stderr, "skicka: %s: remote and local must both be directory or both be files.\n",
 			localPath)
 		os.Exit(1)
 	}
 
 	nDownloadErrors := int32(0)
+	nBytesToDownload := int64(0)
 
-	// First do the folders, so that all of the directories we need have
+	// 1) Download the folders, so that all of the directories we need have
 	// been created before we start the files.
+	// 2) Queue files to download
 	for _, driveFilename := range driveFilenames {
-		file := existingFiles[driveFilename]
-		if !isFolder(file) {
-			continue
-		}
+		driveFile := filesOnDrive[driveFilename]
 		filePath := localPath + "/" + driveFilename[len(drivePath):]
 
-		err := syncFolderDown(filePath, driveFilename, file)
-		if err != nil {
-			nDownloadErrors++
-			fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
+		if isFolder(driveFile) {
+			err := syncFolderDown(filePath, driveFilename, driveFile)
+			if err != nil {
+				nDownloadErrors++
+				fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
+			}
+			delete(filesOnDrive, driveFilename)
+		} else {
+			needsDownload, err := fileNeedsDownload(filePath, driveFilename, driveFile, ignoreTimes)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "skicka: error determining if file %s should be downloaded.\n", driveFilename)
+				os.Exit(1)
+			}
+			if needsDownload {
+				nBytesToDownload += driveFile.FileSize
+			} else {
+				delete(filesOnDrive, driveFilename)
+			}
 		}
 	}
 
@@ -1890,38 +1851,45 @@ func syncHierarchyDown(drivePath string, localPath string,
 			}
 
 			driveFilename := driveFilenames[index]
-			file := existingFiles[driveFilename]
+			driveFile := filesOnDrive[driveFilename]
 			filePath := localPath
 			if len(driveFilename) > len(drivePath) {
 				// If the Drive path is more than a single file.
 				filePath += "/" + driveFilename[len(drivePath):]
 			}
 
-			err := syncFileDown(filePath, driveFilename, file, ignoreTimes)
+			writeCloser, err := createFileWriteCloser(filePath, driveFile)
+			if err != nil {
+				atomic.AddInt32(&nDownloadErrors, 1)
+				fmt.Fprintf(os.Stderr, "skicka: error creating file. Error: %s\n", err)
+				continue
+			}
+			defer writeCloser.Close()
+
+			multiwriter := io.MultiWriter(writeCloser, fileBar)
+			err = downloadDriveFile(multiwriter, driveFile)
+			if err := updateLocalFileProperties(filePath, driveFile); err != nil {
+				fmt.Fprintf(os.Stderr, "skicka: error updating the local file: %s\n", err)
+			}
+			debug.Printf("Downloaded %d bytes for %s", driveFile.FileSize, filePath)
+			verbose.Printf("Wrote %d bytes to %s", driveFile.FileSize, filePath)
+
 			if err != nil {
 				atomic.AddInt32(&nDownloadErrors, 1)
 				fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
 			}
-			fileBar.Increment()
 			updateActiveMemory()
 		}
 	}
 
-	// Set up the progress bar
-	nFiles := 0
-	for _, driveFilename := range driveFilenames {
-		file := existingFiles[driveFilename]
-		if !isFolder(file) {
-			nFiles++
-		}
-	}
-	if nFiles == 0 {
-		return nil
-	}
-
-	fileBar = pb.StartNew(nFiles)
+	fileBar = pb.New64(nBytesToDownload).SetUnits(pb.U_BYTES)
 	fileBar.ShowBar = true
 	fileBar.Output = os.Stderr
+	if nBytesToDownload == 0 {
+		fmt.Fprintf(os.Stderr, "Nothing to download\n")
+		return nil
+	}
+	fileBar.Start()
 
 	// Launch the workers.
 	for i := 0; i < nWorkers; i++ {
@@ -1930,8 +1898,7 @@ func syncHierarchyDown(drivePath string, localPath string,
 	// Give them the indices of the filenames of actual files (not
 	// directories).
 	for index, driveFilename := range driveFilenames {
-		file := existingFiles[driveFilename]
-		if !isFolder(file) {
+		if filesOnDrive[driveFilename] != nil {
 			indexChan <- index
 		}
 	}
@@ -1939,16 +1906,67 @@ func syncHierarchyDown(drivePath string, localPath string,
 	for i := 0; i < nWorkers; i++ {
 		indexChan <- -1
 	}
-	fileBar.Finish()
 	// And now wait for the workers to all return.
 	for i := 0; i < nWorkers; i++ {
 		<-doneChan
 	}
+	fileBar.Finish()
 
 	if nDownloadErrors == 0 {
 		return nil
 	}
 	return fmt.Errorf("%d files not downloaded due to errors", nDownloadErrors)
+}
+
+func createFileWriteCloser(localPath string, driveFile *drive.File) (io.WriteCloser, error) {
+	encrypted, err := isEncrypted(driveFile)
+	if err != nil {
+		return nil, err
+	}
+	if encrypted {
+		localPath = strings.TrimSuffix(localPath, ".aes256")
+	}
+
+	// Create or overwrite the local file.
+	f, err := os.Create(localPath)
+	if err != nil {
+		return nil, err
+	}
+
+	permissions, err := getPermissions(driveFile)
+	if err != nil {
+		permissions = 0644
+	}
+	f.Chmod(permissions)
+
+	// Set the last access and modification time of the newly-created
+	// file to match the modification time of the original file that was
+	// uploaded to Google Drive.
+	if modifiedTime, err := getModificationTime(driveFile); err == nil {
+		return f, os.Chtimes(localPath, modifiedTime, modifiedTime)
+	}
+	return f, err
+}
+
+func updateLocalFileProperties(filepath string, file *drive.File) error {
+	// make sure that the local permissions and modification
+	// time match the corresponding values stored in Drive.
+	modifiedTime, err := getModificationTime(file)
+	if err != nil {
+		return err
+	}
+	err = os.Chtimes(filepath, modifiedTime, modifiedTime)
+	if err != nil {
+		return err
+	}
+	permissions, err := getPermissions(file)
+	if err != nil {
+		permissions = 0644
+	}
+	if err := os.Chmod(filepath, permissions); err != nil {
+		return err
+	}
+	return nil
 }
 
 ///////////////////////////////////////////////////////////////////////////
