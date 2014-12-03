@@ -1857,7 +1857,8 @@ func syncHierarchyDown(drivePath string, localPath string,
 		} else {
 			needsDownload, err := fileNeedsDownload(filePath, driveFilename, driveFile, ignoreTimes)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "skicka: error determining if file %s should be downloaded.\n", driveFilename)
+				fmt.Fprintf(os.Stderr, "skicka: error determining if file %s should "+
+					"be downloaded: %v\n", driveFilename, err)
 				os.Exit(1)
 			}
 			if needsDownload {
