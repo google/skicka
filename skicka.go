@@ -1270,8 +1270,10 @@ func getFileContentsReaderForUpload(path string, encrypt bool,
 // but has different contents, the contents are updated.  The Unix
 // permissions and file modification time on Drive are also updated
 // appropriately.
+// Besides being sent up to Google Drive, the file is tee'd (via io.Tee)
+// into an optional writer variable.  This variable can safely be nil.
 func syncFileUp(file LocalFile, encrypt bool,
-	existingDriveFiles map[string]*drive.File) error {
+	existingDriveFiles map[string]*drive.File, writer io.Writer) error {
 	debug.Printf("syncFileUp: %#v", file.FileInfo)
 
 	// We need to create the file or folder on Google Drive.
@@ -1334,6 +1336,7 @@ func syncFileUp(file LocalFile, encrypt bool,
 		}
 
 		for ntries := 0; ntries < 5; ntries++ {
+			var reader io.Reader
 			contentsReader, length, err :=
 				getFileContentsReaderForUpload(file.LocalPath, encrypt, iv)
 			if contentsReader != nil {
@@ -1342,8 +1345,12 @@ func syncFileUp(file LocalFile, encrypt bool,
 			if err != nil {
 				return err
 			}
+			reader = contentsReader
+			if writer != nil {
+				reader = io.TeeReader(contentsReader, writer)
+			}
 
-			err = uploadFileContents(driveFile, contentsReader, length, ntries)
+			err = uploadFileContents(driveFile, reader, length, ntries)
 			if err == nil {
 				// Success!
 				break
@@ -1429,7 +1436,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	// And finally sync the directories, which serves to create any missing ones.
 	for _, dirName := range directoryNames {
 		file := directoryMap[dirName]
-		err = syncFileUp(file, encrypt, existingFiles)
+		err = syncFileUp(file, encrypt, existingFiles, progressBar)
 		if err != nil {
 			nUploadErrors++
 			fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", file.LocalPath, err)
@@ -1465,13 +1472,12 @@ func syncHierarchyUp(localPath string, driveRoot string,
 			localFile := toUpload[index]
 
 			err = syncFileUp(localFile, encrypt,
-				existingFiles)
+				existingFiles, progressBar)
 			if err != nil {
 				atomic.AddInt32(&nUploadErrors, 1)
 				fmt.Fprintf(os.Stderr, "skicka: %s: %v\n",
 					localFile.LocalPath, err)
 			}
-			progressBar.Add64(localFile.FileInfo.Size())
 			updateActiveMemory()
 		}
 	}
@@ -1904,24 +1910,22 @@ func syncHierarchyDown(drivePath string, localPath string,
 
 			writeCloser, err := createFileWriteCloser(filePath, driveFile)
 			if err != nil {
-				atomic.AddInt32(&nDownloadErrors, 1)
-				fmt.Fprintf(os.Stderr, "skicka: error creating file. Error: %s\n", err)
+				addErrorAndPrintMessage(&nDownloadErrors, "skicka: error creating file write closer.", err)
 				continue
 			}
 			defer writeCloser.Close()
 
 			multiwriter := io.MultiWriter(writeCloser, progressBar)
-			err = downloadDriveFile(multiwriter, driveFile)
+			if err := downloadDriveFile(multiwriter, driveFile); err != nil {
+				addErrorAndPrintMessage(&nDownloadErrors, "skicka: error downloading drive file.", err)
+				continue
+			}
 			if err := updateLocalFileProperties(filePath, driveFile); err != nil {
-				fmt.Fprintf(os.Stderr, "skicka: error updating the local file: %s\n", err)
+				addErrorAndPrintMessage(&nDownloadErrors, "skicka: error updating the local file.", err)
+				continue
 			}
 			debug.Printf("Downloaded %d bytes for %s", driveFile.FileSize, filePath)
 			verbose.Printf("Wrote %d bytes to %s", driveFile.FileSize, filePath)
-
-			if err != nil {
-				atomic.AddInt32(&nDownloadErrors, 1)
-				fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
-			}
 			updateActiveMemory()
 		}
 	}
@@ -1960,6 +1964,11 @@ func syncHierarchyDown(drivePath string, localPath string,
 		return nil
 	}
 	return fmt.Errorf("%d files not downloaded due to errors", nDownloadErrors)
+}
+
+func addErrorAndPrintMessage(totalErrors *int32, message string, err error) {
+	fmt.Fprintf(os.Stderr, message+" Error: %s\n", err)
+	atomic.AddInt32(totalErrors, 1)
 }
 
 func createFileWriteCloser(localPath string, driveFile *drive.File) (io.WriteCloser, error) {
