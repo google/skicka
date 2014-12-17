@@ -24,8 +24,6 @@ import (
 	"code.google.com/p/gcfg"
 	"code.google.com/p/go.crypto/pbkdf2"
 	"code.google.com/p/goauth2/oauth"
-	"google.golang.org/api/drive/v2"
-	"google.golang.org/api/googleapi"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/md5"
@@ -35,6 +33,8 @@ import (
 	"flag"
 	"fmt"
 	"github.com/cheggaaa/pb"
+	"google.golang.org/api/drive/v2"
+	"google.golang.org/api/googleapi"
 	"io"
 	"io/ioutil"
 	"log"
@@ -1069,7 +1069,12 @@ func getDriveFileContentsReader(driveFile *drive.File) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	url := driveFile.DownloadUrl
+
+	if url == "" {
+		url = driveFile.ExportLinks[driveFile.MimeType]
+	}
 
 	for ntries := 0; ; ntries++ {
 		request, err := http.NewRequest("GET", url, nil)
