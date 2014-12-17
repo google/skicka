@@ -1444,7 +1444,6 @@ func syncHierarchyUp(localPath string, driveRoot string,
 			os.Exit(1)
 		}
 		updateActiveMemory()
-		progressBar.Add64(file.FileInfo.Size())
 	}
 	timeDelta("Create Google Drive directories")
 
@@ -1773,7 +1772,6 @@ func syncFolderDown(localPath string, driveFilename string, driveFile *drive.Fil
 
 // Sync the given file from Google Drive to the local filesystem.
 func downloadDriveFile(writer io.Writer, driveFile *drive.File) error {
-
 	driveContentsReader, err := getDriveFileContentsReader(driveFile)
 	if driveContentsReader != nil {
 		defer driveContentsReader.Close()
