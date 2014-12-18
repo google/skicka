@@ -1080,7 +1080,12 @@ func getDriveFileContentsReader(driveFile *drive.File) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	url := driveFile.DownloadUrl
+
+	if url == "" {
+		url = driveFile.ExportLinks[driveFile.MimeType]
+	}
 
 	for ntries := 0; ; ntries++ {
 		request, err := http.NewRequest("GET", url, nil)
