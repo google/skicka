@@ -24,8 +24,6 @@ import (
 	"code.google.com/p/gcfg"
 	"code.google.com/p/go.crypto/pbkdf2"
 	"code.google.com/p/goauth2/oauth"
-	"google.golang.org/api/drive/v2"
-	"google.golang.org/api/googleapi"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/md5"
@@ -35,6 +33,8 @@ import (
 	"flag"
 	"fmt"
 	"github.com/cheggaaa/pb"
+	"google.golang.org/api/drive/v2"
+	"google.golang.org/api/googleapi"
 	"io"
 	"io/ioutil"
 	"log"
@@ -851,7 +851,7 @@ func getFolderContents(path string, parentFolder *drive.File, recursive bool,
 // 'includeBase' indicates whether the *drive.File for the given path should
 // be included in the result, and 'mustExist' indicates whether an error
 // should be returned if the given path doesn't exist on Drive.
-func getFilesAtDrivePath(path string, recursive, includeBase,
+func getFilesAtRemotePath(path string, recursive, includeBase,
 	mustExist bool) map[string]*drive.File {
 	existingFiles := make(map[string]*drive.File)
 	file, err := getDriveFile(path)
@@ -1168,10 +1168,10 @@ func isFolder(f *drive.File) bool {
 // Uploading files and directory hierarchies to Google Drive
 
 // Representation of a local file that may need to be synced up to Drive.
-type LocalFile struct {
-	LocalPath string
-	DrivePath string
-	FileInfo  os.FileInfo
+type LocalToRemoteFileMapping struct {
+	LocalPath     string
+	RemotePath    string
+	LocalFileInfo os.FileInfo
 }
 
 // Perform fairly inexpensive comparisons of the file size and last modification
@@ -1272,9 +1272,9 @@ func getFileContentsReaderForUpload(path string, encrypt bool,
 // appropriately.
 // Besides being sent up to Google Drive, the file is tee'd (via io.Tee)
 // into an optional writer variable.  This variable can safely be nil.
-func syncFileUp(file LocalFile, encrypt bool,
+func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 	existingDriveFiles map[string]*drive.File, writer io.Writer) error {
-	debug.Printf("syncFileUp: %#v", file.FileInfo)
+	debug.Printf("syncFileUp: %#v", fileMapping.LocalFileInfo)
 
 	// We need to create the file or folder on Google Drive.
 	var err error
@@ -1282,7 +1282,7 @@ func syncFileUp(file LocalFile, encrypt bool,
 	// Get the *drive.File for the folder to create the new file in.
 	// This folder should definitely exist at this point, since we
 	// create all folders needed before starting to upload files.
-	dirPath := filepath.Dir(file.DrivePath)
+	dirPath := filepath.Dir(fileMapping.RemotePath)
 	if dirPath == "." {
 		dirPath = "/"
 	}
@@ -1299,14 +1299,14 @@ func syncFileUp(file LocalFile, encrypt bool,
 		}
 	}
 
-	baseName := filepath.Base(file.DrivePath)
+	baseName := filepath.Base(fileMapping.RemotePath)
 	var driveFile *drive.File
 
-	if file.FileInfo.IsDir() {
+	if fileMapping.LocalFileInfo.IsDir() {
 		driveFile, _ = createDriveFolder(baseName,
-			file.FileInfo.Mode(), file.FileInfo.ModTime(), parentFile)
-		atomic.AddInt64(&stats.UploadBytes, file.FileInfo.Size())
-		verbose.Printf("Created Google Drive folder %s", file.DrivePath)
+			fileMapping.LocalFileInfo.Mode(), fileMapping.LocalFileInfo.ModTime(), parentFile)
+		atomic.AddInt64(&stats.UploadBytes, fileMapping.LocalFileInfo.Size())
+		verbose.Printf("Created Google Drive folder %s", fileMapping.RemotePath)
 
 		// We actually only update the map when we create new folders;
 		// we don't update it for new files.  There are two reasons
@@ -1320,10 +1320,10 @@ func syncFileUp(file LocalFile, encrypt bool,
 		// another session, this map may become stale; we don't
 		// explicitly look out for this and will presumably error out
 		// in interesting ways if it does happen.
-		existingDriveFiles[file.DrivePath] = driveFile
+		existingDriveFiles[fileMapping.RemotePath] = driveFile
 	} else {
-		driveFile, err = createDriveFile(baseName, file.FileInfo.Mode(),
-			file.FileInfo.ModTime(), encrypt, parentFile)
+		driveFile, err = createDriveFile(baseName, fileMapping.LocalFileInfo.Mode(),
+			fileMapping.LocalFileInfo.ModTime(), encrypt, parentFile)
 		if err != nil {
 			return err
 		}
@@ -1338,7 +1338,7 @@ func syncFileUp(file LocalFile, encrypt bool,
 		for ntries := 0; ntries < 5; ntries++ {
 			var reader io.Reader
 			contentsReader, length, err :=
-				getFileContentsReaderForUpload(file.LocalPath, encrypt, iv)
+				getFileContentsReaderForUpload(fileMapping.LocalPath, encrypt, iv)
 			if contentsReader != nil {
 				defer contentsReader.Close()
 			}
@@ -1358,16 +1358,16 @@ func syncFileUp(file LocalFile, encrypt bool,
 
 			if re, ok := err.(RetryHTTPTransmitError); ok {
 				debug.Printf("%s: got retry http error--retrying: %s",
-					file.LocalPath, re.Error())
+					fileMapping.LocalPath, re.Error())
 			} else {
 				return err
 			}
 		}
 	}
 
-	verbose.Printf("Updated local %s -> Google Drive %s", file.LocalPath,
-		file.DrivePath)
-	return updateModificationTime(driveFile, file.FileInfo.ModTime())
+	verbose.Printf("Updated local %s -> Google Drive %s", fileMapping.LocalPath,
+		fileMapping.RemotePath)
+	return updateModificationTime(driveFile, fileMapping.LocalFileInfo.ModTime())
 }
 
 func checkFatalError(err error, message string) {
@@ -1396,30 +1396,30 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	// RateLimitedReader Read() function.
 	launchBandwidthTask(config.Upload.Bytes_per_second_limit)
 
-	localFiles, err := compileUploadFileTree(localPath, driveRoot, encrypt)
+	fileMappings, err := compileUploadFileTree(localPath, driveRoot, encrypt)
 	checkFatalError(err, "skicka: error getting local filetree: %v\n")
 	timeDelta("Walk local directories")
-	toUpload, err := filterFilesToUpload(localFiles, existingFiles, encrypt, ignoreTimes)
+	fileMappings, err = filterFilesToUpload(fileMappings, existingFiles, encrypt, ignoreTimes)
 	checkFatalError(err, "skicka: error determining files to sync: %v\n")
 
-	if len(toUpload) == 0 {
+	if len(fileMappings) == 0 {
 		fmt.Fprintln(os.Stderr, "There are no new files that need to be uploaded.")
 		return nil
 	}
 
 	nBytesToUpload := int64(0)
-	for _, info := range toUpload {
-		nBytesToUpload += info.FileInfo.Size()
+	for _, info := range fileMappings {
+		nBytesToUpload += info.LocalFileInfo.Size()
 	}
 
 	// Given the list of files to sync, first find all of the directories and
 	// then either get or create a Drive folder for each one.
-	directoryMap := make(map[string]LocalFile)
+	directoryMappingMap := make(map[string]LocalToRemoteFileMapping)
 	var directoryNames []string
-	for _, localfile := range toUpload {
-		if localfile.FileInfo.IsDir() {
-			directoryNames = append(directoryNames, localfile.DrivePath)
-			directoryMap[localfile.DrivePath] = localfile
+	for _, localfile := range fileMappings {
+		if localfile.LocalFileInfo.IsDir() {
+			directoryNames = append(directoryNames, localfile.RemotePath)
+			directoryMappingMap[localfile.RemotePath] = localfile
 		}
 	}
 
@@ -1436,7 +1436,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 
 	// And finally sync the directories, which serves to create any missing ones.
 	for _, dirName := range directoryNames {
-		file := directoryMap[dirName]
+		file := directoryMappingMap[dirName]
 		err = syncFileUp(file, encrypt, existingFiles, progressBar)
 		if err != nil {
 			nUploadErrors++
@@ -1469,7 +1469,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 				break
 			}
 
-			localFile := toUpload[index]
+			localFile := fileMappings[index]
 
 			err = syncFileUp(localFile, encrypt,
 				existingFiles, progressBar)
@@ -1488,8 +1488,8 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	}
 	// Communicate the indices of the entries in the localFiles[] array
 	// to be processed by the workers.
-	for index, file := range toUpload {
-		if !file.FileInfo.IsDir() {
+	for index, file := range fileMappings {
+		if !file.LocalFileInfo.IsDir() {
 			indexChan <- index
 		}
 	}
@@ -1511,38 +1511,38 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	return fmt.Errorf("%d files not uploaded due to errors", nUploadErrors)
 }
 
-func filterFilesToUpload(localFiles []LocalFile, existingDriveFiles map[string]*drive.File,
-	encrypt, ignoreTimes bool) ([]LocalFile, error) {
+func filterFilesToUpload(fileMappings []LocalToRemoteFileMapping, existingDriveFiles map[string]*drive.File,
+	encrypt, ignoreTimes bool) ([]LocalToRemoteFileMapping, error) {
 
 	// files to be uploaded are kept in this slice
-	var toUpload []LocalFile
+	var toUpload []LocalToRemoteFileMapping
 
-	for _, file := range localFiles {
-		driveFile, exists := existingDriveFiles[file.DrivePath]
+	for _, file := range fileMappings {
+		driveFile, exists := existingDriveFiles[file.RemotePath]
 		if !exists {
 			toUpload = append(toUpload, file)
 		} else {
 			// The file already exists on Drive; just make sure it has all
 			// of the properties that we expect.
-			if err := createMissingProperties(driveFile, file.FileInfo.Mode(), encrypt); err != nil {
+			if err := createMissingProperties(driveFile, file.LocalFileInfo.Mode(), encrypt); err != nil {
 
 				return nil, err
 			}
 
 			// Go ahead and update the file's permissions if they've changed
-			if err := updatePermissions(driveFile, file.FileInfo.Mode()); err != nil {
+			if err := updatePermissions(driveFile, file.LocalFileInfo.Mode()); err != nil {
 				return nil, err
 			}
 
-			if file.FileInfo.IsDir() {
+			if file.LocalFileInfo.IsDir() {
 				// If it's a directory, once it's created and the permissions and times
 				// are updated (if needed), we're all done.
 				t, err := getModificationTime(driveFile)
 				if err != nil {
 					return nil, err
 				}
-				if !t.Equal(file.FileInfo.ModTime()) {
-					if err := updateModificationTime(driveFile, file.FileInfo.ModTime()); err != nil {
+				if !t.Equal(file.LocalFileInfo.ModTime()) {
+					if err := updateModificationTime(driveFile, file.LocalFileInfo.ModTime()); err != nil {
 						return nil, err
 					}
 				}
@@ -1550,7 +1550,7 @@ func filterFilesToUpload(localFiles []LocalFile, existingDriveFiles map[string]*
 			}
 
 			// Do superficial checking on the files
-			metadataMatches, err := fileMetadataMatches(file.FileInfo, encrypt, driveFile)
+			metadataMatches, err := fileMetadataMatches(file.LocalFileInfo, encrypt, driveFile)
 
 			if err != nil {
 				return nil, err
@@ -1579,7 +1579,7 @@ func filterFilesToUpload(localFiles []LocalFile, existingDriveFiles map[string]*
 				// modified time on Drive so that we don't keep checking this
 				// file.
 				debug.Printf("contents match, timestamps do not")
-				if err := updateModificationTime(driveFile, file.FileInfo.ModTime()); err != nil {
+				if err := updateModificationTime(driveFile, file.LocalFileInfo.ModTime()); err != nil {
 					return nil, err
 				}
 			} else if metadataMatches == true {
@@ -1604,10 +1604,10 @@ func filterFilesToUpload(localFiles []LocalFile, existingDriveFiles map[string]*
 	return toUpload, nil
 }
 
-func compileUploadFileTree(localPath, driveRoot string, encrypt bool) ([]LocalFile, error) {
+func compileUploadFileTree(localPath, driveRoot string, encrypt bool) ([]LocalToRemoteFileMapping, error) {
 	// Walk the local directory hierarchy starting at 'localPath' and build
 	// an array of files that may need to be synchronized.
-	var localFiles []LocalFile
+	var fileMappings []LocalToRemoteFileMapping
 
 	walkFuncCallback := func(path string, info os.FileInfo, patherr error) error {
 		path = filepath.Clean(path)
@@ -1645,12 +1645,12 @@ func compileUploadFileTree(localPath, driveRoot string, encrypt bool) ([]LocalFi
 		if info.IsDir() == false && encrypt == true {
 			drivePath += ".aes256"
 		}
-		localFiles = append(localFiles, LocalFile{path, drivePath, info})
+		fileMappings = append(fileMappings, LocalToRemoteFileMapping{path, drivePath, info})
 		return nil
 	}
 
 	err := filepath.Walk(localPath, walkFuncCallback)
-	return localFiles, err
+	return fileMappings, err
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -2208,7 +2208,7 @@ func du() {
 	recursive := true
 	includeBase := false
 	mustExist := true
-	existingFiles := getFilesAtDrivePath(drivePath, recursive, includeBase,
+	existingFiles := getFilesAtRemotePath(drivePath, recursive, includeBase,
 		mustExist)
 
 	// Accumulate the size in bytes of each folder in the hierarchy
@@ -2398,7 +2398,7 @@ func ls() {
 
 	includeBase := false
 	mustExist := true
-	existingFiles := getFilesAtDrivePath(drivePath, recursive, includeBase,
+	existingFiles := getFilesAtRemotePath(drivePath, recursive, includeBase,
 		mustExist)
 
 	var filenames []string
@@ -2481,7 +2481,7 @@ func upload() {
 	includeBase := true
 	mustExist := false
 	fmt.Fprintf(os.Stderr, "skicka: Getting list of files to upload... ")
-	existingFiles := getFilesAtDrivePath(drivePath, recursive, includeBase,
+	existingFiles := getFilesAtRemotePath(drivePath, recursive, includeBase,
 		mustExist)
 	fmt.Fprintf(os.Stderr, "Done. Starting upload.\n")
 
@@ -2524,7 +2524,7 @@ func download() {
 	includeBase := true
 	mustExist := true
 	fmt.Fprintf(os.Stderr, "skicka: Getting list of files to download... ")
-	existingFiles := getFilesAtDrivePath(drivePath, recursive, includeBase,
+	existingFiles := getFilesAtRemotePath(drivePath, recursive, includeBase,
 		mustExist)
 	fmt.Fprintf(os.Stderr, "Done. Starting download.\n")
 
