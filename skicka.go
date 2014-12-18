@@ -1317,6 +1317,7 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 		driveFile, _ = createDriveFolder(baseName,
 			fileMapping.LocalFileInfo.Mode(), fileMapping.LocalFileInfo.ModTime(), parentFile)
 		atomic.AddInt64(&stats.UploadBytes, fileMapping.LocalFileInfo.Size())
+		pb.Add64(fileMapping.LocalFileInfo.Size())
 		verbose.Printf("Created Google Drive folder %s", fileMapping.RemotePath)
 
 		// We actually only update the map when we create new folders;
