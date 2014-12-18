@@ -1284,7 +1284,7 @@ func getFileContentsReaderForUpload(path string, encrypt bool,
 // Besides being sent up to Google Drive, the file is tee'd (via io.Tee)
 // into an optional writer variable.  This variable can safely be nil.
 func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
-	existingDriveFiles map[string]*drive.File, writer io.Writer) error {
+	existingDriveFiles map[string]*drive.File, pb *pb.ProgressBar) error {
 	debug.Printf("syncFileUp: %#v", fileMapping.LocalFileInfo)
 
 	// We need to create the file or folder on Google Drive.
@@ -1348,6 +1348,8 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 
 		for ntries := 0; ntries < 5; ntries++ {
 			var reader io.Reader
+			var countingReader *ByteCountingReader
+
 			contentsReader, length, err :=
 				getFileContentsReaderForUpload(fileMapping.LocalPath, encrypt, iv)
 			if contentsReader != nil {
@@ -1357,8 +1359,12 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 				return err
 			}
 			reader = contentsReader
-			if writer != nil {
-				reader = io.TeeReader(contentsReader, writer)
+
+			if pb != nil {
+				countingReader := &ByteCountingReader{
+					R: reader,
+				}
+				reader = io.TeeReader(countingReader, pb)
 			}
 
 			err = uploadFileContents(driveFile, reader, length, ntries)
@@ -1370,7 +1376,17 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 			if re, ok := err.(RetryHTTPTransmitError); ok {
 				debug.Printf("%s: got retry http error--retrying: %s",
 					fileMapping.LocalPath, re.Error())
+				if pb != nil {
+					// The "progress" made so far on this file should be rolled back
+					pb.Add64(int64(0 - countingReader.bytesRead))
+				}
 			} else {
+				// This file won't be uploaded, so subtract the expected progress
+				// from the total expected bytes
+				if pb != nil {
+					pb.Add64(int64(0 - countingReader.bytesRead))
+					pb.Total -= length
+				}
 				return err
 			}
 		}
@@ -1926,6 +1942,7 @@ func syncHierarchyDown(drivePath string, localPath string,
 			defer writeCloser.Close()
 
 			multiwriter := io.MultiWriter(writeCloser, progressBar)
+
 			if err := downloadDriveFile(multiwriter, driveFile); err != nil {
 				addErrorAndPrintMessage(&nDownloadErrors, "skicka: error downloading drive file.", err)
 				continue
