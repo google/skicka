@@ -240,6 +240,17 @@ func (lr RateLimitedReader) Read(dst []byte) (int, error) {
 	return read, err
 }
 
+type ByteCountingReader struct {
+	R         io.Reader
+	bytesRead int
+}
+
+func (bcr *ByteCountingReader) Read(dst []byte) (int, error) {
+	read, err := bcr.R.Read(dst)
+	bcr.bytesRead += read
+	return read, err
+}
+
 ///////////////////////////////////////////////////////////////////////////
 // Small utility functions
 
