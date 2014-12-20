@@ -139,6 +139,15 @@ func (c CommandSyntaxError) Error() string {
 	return fmt.Sprintf("%s syntax error: %s", c.Cmd, c.Msg)
 }
 
+type driveQueryer interface {
+	getDriveFile(path string) (*drive.File, error)
+	isFolder(f *drive.File) bool
+}
+
+type driveDeleter interface {
+	deleteDriveFile(file *drive.File) error
+}
+
 // FileCloser is kind of a hack: it implements the io.ReadCloser
 // interface, wherein the Read() calls go to R, and the Close() call
 // goes to C.
@@ -800,6 +809,32 @@ func createDriveFolder(title string, mode os.FileMode, modTime time.Time,
 	return f, nil
 }
 
+type fileNotFoundError struct {
+	path        string
+	invokingCmd string
+}
+
+func (err fileNotFoundError) Error() string {
+	msg := ""
+	if err.invokingCmd != "" {
+		msg += fmt.Sprintf("%s: ", err.invokingCmd)
+	}
+	return fmt.Sprintf("%s%s: No such file or directory", msg, err.path)
+}
+
+type removeDirectoryError struct {
+	path        string
+	invokingCmd string
+}
+
+func (err removeDirectoryError) Error() string {
+	msg := ""
+	if err.invokingCmd != "" {
+		msg += fmt.Sprintf("%s: ", err.invokingCmd)
+	}
+	return fmt.Sprintf("%s%s: is a directory", msg, err.path)
+}
+
 // Returns the *drive.File corresponding to a given path starting from the
 // root of the Google Drive filesystem.  (Note that *drive.File is used to
 // represent both files and folders in Google Drive.)
@@ -823,7 +858,9 @@ func getDriveFile(path string) (*drive.File, error) {
 		files := runDriveQuery(query)
 
 		if len(files) == 0 {
-			return nil, fmt.Errorf("%s: not found", path)
+			return nil, &fileNotFoundError{
+				path: path,
+			}
 		} else if len(files) > 1 {
 			return nil, fmt.Errorf("%s: multiple files found", path)
 		} else {
@@ -2409,6 +2446,26 @@ var rmSyntaxError CommandSyntaxError = CommandSyntaxError{
 		"Usage: rm [-r, -s] drive path",
 }
 
+type Remover struct {
+	recursive     bool
+	skipTrash     bool
+	drivePath     string
+	queryService  driveQueryer
+	deleteService driveDeleter
+}
+
+func (remover *Remover) getDriveFile(path string) (*drive.File, error) {
+	return nil, nil
+}
+
+func (remover *Remover) isFolder(file *drive.File) bool {
+	return isFolder(file)
+}
+
+func (remover *Remover) deleteDriveFile(file *drive.File) error {
+	return nil
+}
+
 func rm(args []string) {
 	recursive, skipTrash := false, false
 	var drivePath string
@@ -2426,17 +2483,44 @@ func rm(args []string) {
 		}
 	}
 
-	if err := checkRmArguments(drivePath, recursive, skipTrash); err != nil {
+	remover := &Remover{
+		recursive: recursive,
+		skipTrash: skipTrash,
+		drivePath: drivePath,
+	}
+
+	if err := checkRmArguments(drivePath, recursive, skipTrash, remover); err != nil {
 		printErrorAndExit(err)
 	}
 
 	//mediator.removeFileAtDrivePath(drivePath, recursive, skipTrash)
 }
 
-func checkRmArguments(drivePath string, recursive, skipTrash bool) error {
+func checkRmArguments(drivePath string, recursive, skipTrash bool, queryer driveQueryer) error {
 	if drivePath == "" {
 		return rmSyntaxError
 	}
+
+	driveFile, err := queryer.getDriveFile(drivePath)
+	if err != nil {
+		switch err.(type) {
+		case fileNotFoundError:
+			return fileNotFoundError{
+				path:        drivePath,
+				invokingCmd: "rm",
+			}
+		default:
+			return err
+		}
+	}
+
+	if !recursive && queryer.isFolder(driveFile) {
+		return removeDirectoryError{
+			path:        drivePath,
+			invokingCmd: "rm",
+		}
+	}
+
 	return nil
 }
 
