@@ -130,6 +130,15 @@ func (r RetryHTTPTransmitError) Error() string {
 	return fmt.Sprintf("http %d error (%s); retry", r.StatusCode, r.StatusBody)
 }
 
+type CommandSyntaxError struct {
+	Cmd string
+	Msg string
+}
+
+func (c CommandSyntaxError) Error() string {
+	return fmt.Sprintf("%s syntax error: %s", c.Cmd, c.Msg)
+}
+
 // FileCloser is kind of a hack: it implements the io.ReadCloser
 // interface, wherein the Read() calls go to R, and the Close() call
 // goes to C.
@@ -2206,6 +2215,14 @@ Commands and their options are:
              where intermediate directories in the path are created if -p is
              specified.
 
+  rm	     Remove a file or directory at the given Google Drive path.
+             Arguments: [-r, -s] <drive path>,
+             where files and directories are recursively removed if -r is specified
+             and the google drive trash is skipped if -s is specified. The default 
+             behavior is to file if the drive path specified is a directory and -r is 
+             not specified, and to send files to the trash instead of permanently
+             deleting them.
+
   upload     Uploads all files in the local directory and its children to the
              given Google Drive path. Skips files that have already been
              uploaded.
@@ -2227,11 +2244,12 @@ General options valid for all commands:
 `)
 }
 
-func du() {
-	if len(flag.Args()) != 2 {
+func du(args []string) {
+
+	if len(args) != 1 {
 		printUsageAndExit()
 	}
-	drivePath := filepath.Clean(flag.Arg(1))
+	drivePath := filepath.Clean(args[0])
 
 	recursive := true
 	includeBase := false
@@ -2264,11 +2282,11 @@ func du() {
 	fmt.Printf("%s  %s\n", fmtbytes(totalSize, true), drivePath)
 }
 
-func cat() {
-	if len(flag.Args()) != 2 {
+func cat(args []string) {
+	if len(args) != 1 {
 		printUsageAndExit()
 	}
-	filename := filepath.Clean(flag.Arg(1))
+	filename := filepath.Clean(args[0])
 
 	file, err := getDriveFile(filename)
 	timeDelta("Get file descriptors from Google Drive")
@@ -2293,17 +2311,18 @@ func cat() {
 	}
 }
 
-func mkdir() {
+func mkdir(args []string) {
 	makeIntermediate := false
-	i := 1
-	for ; i+1 < len(flag.Args()); i++ {
-		if flag.Arg(i) == "-p" {
+
+	i := 0
+	for ; i+1 < len(args); i++ {
+		if args[i] == "-p" {
 			makeIntermediate = true
 		} else {
 			printUsageAndExit()
 		}
 	}
-	drivePath := filepath.Clean(flag.Arg(i))
+	drivePath := filepath.Clean(args[i])
 
 	parent, err := getFileById("root")
 	if err != nil {
@@ -2384,25 +2403,67 @@ func getPermissionsAsString(driveFile *drive.File) (string, error) {
 	return str, nil
 }
 
-func ls() {
+var rmSyntaxError CommandSyntaxError = CommandSyntaxError{
+	Cmd: "rm",
+	Msg: "drive path cannot be empty.\n" +
+		"Usage: rm [-r, -s] drive path",
+}
+
+func rm(args []string) {
+	recursive, skipTrash := false, false
+	var drivePath string
+
+	for _, arg := range args {
+		switch {
+		case arg == "-r":
+			recursive = true
+		case arg == "-s":
+			skipTrash = true
+		case drivePath == "":
+			drivePath = arg
+		default:
+			printErrorAndExit(rmSyntaxError)
+		}
+	}
+
+	if err := checkRmArguments(drivePath, recursive, skipTrash); err != nil {
+		printErrorAndExit(err)
+	}
+
+	//mediator.removeFileAtDrivePath(drivePath, recursive, skipTrash)
+}
+
+func checkRmArguments(drivePath string, recursive, skipTrash bool) error {
+	if drivePath == "" {
+		return rmSyntaxError
+	}
+	return nil
+}
+
+func removeFileAtDrivePath(drivePath string, recursive, skipTrash bool) {
+	fmt.Printf("drivePath: %s, recursive: %v, skipTrash: %v\n", drivePath, recursive, skipTrash)
+}
+
+func ls(args []string) {
 	long := false
 	longlong := false
 	recursive := false
 	var drivePath string
-	i := 1
-	for ; i < len(flag.Args()); i++ {
-		if flag.Arg(i) == "-l" {
+	for _, value := range args {
+		switch {
+		case value == "-l":
 			long = true
-		} else if flag.Arg(i) == "-ll" {
+		case value == "-ll":
 			longlong = true
-		} else if flag.Arg(i) == "-r" {
+		case value == "-r":
 			recursive = true
-		} else if drivePath == "" {
-			drivePath = flag.Arg(i)
-		} else {
+		case drivePath == "":
+			drivePath = value
+		default:
 			printUsageAndExit()
 		}
 	}
+
 	if drivePath == "" {
 		drivePath = "/"
 	}
@@ -2458,17 +2519,17 @@ func ls() {
 	}
 }
 
-func upload() {
+func upload(args []string) {
 	ignoreTimes := false
 	encrypt := false
 
-	if len(flag.Args()) < 3 {
+	if len(args) < 2 {
 		printUsageAndExit()
 	}
 
-	i := 1
-	for ; i+2 < len(flag.Args()); i++ {
-		switch flag.Arg(i) {
+	i := 0
+	for ; i+2 < len(args); i++ {
+		switch args[i] {
 		case "-ignore-times":
 			ignoreTimes = true
 		case "-encrypt":
@@ -2478,8 +2539,8 @@ func upload() {
 		}
 	}
 
-	localPath := filepath.Clean(flag.Arg(i))
-	drivePath := filepath.Clean(flag.Arg(i + 1))
+	localPath := filepath.Clean(args[i])
+	drivePath := filepath.Clean(args[i+1])
 
 	// Make sure localPath exists and is a directory.
 	if _, err := os.Stat(localPath); err != nil {
@@ -2508,15 +2569,15 @@ func upload() {
 	}
 }
 
-func download() {
-	if len(flag.Args()) < 3 {
+func download(args []string) {
+	if len(args) < 2 {
 		printUsageAndExit()
 	}
 
 	ignoreTimes := false
-	i := 1
-	for ; i+2 < len(flag.Args()); i++ {
-		switch flag.Arg(i) {
+	i := 0
+	for ; i+2 < len(args); i++ {
+		switch args[i] {
 		case "-ignore-times":
 			ignoreTimes = true
 		default:
@@ -2524,8 +2585,8 @@ func download() {
 		}
 	}
 
-	drivePath := filepath.Clean(flag.Arg(i))
-	localPath := filepath.Clean(flag.Arg(i + 1))
+	drivePath := filepath.Clean(args[i])
+	localPath := filepath.Clean(args[i+1])
 
 	recursive := true
 	includeBase := true
@@ -2602,19 +2663,23 @@ func main() {
 			"client: %v\n", err))
 	}
 
+	args := flag.Args()[1:]
+
 	switch cmd {
 	case "du":
-		du()
+		du(args)
 	case "cat":
-		cat()
+		cat(args)
 	case "ls":
-		ls()
+		ls(args)
 	case "mkdir":
-		mkdir()
+		mkdir(args)
 	case "upload":
-		upload()
+		upload(args)
 	case "download":
-		download()
+		download(args)
+	case "rm":
+		rm(args)
 	default:
 		printUsageAndExit()
 	}
