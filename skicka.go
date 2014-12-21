@@ -55,6 +55,7 @@ import (
 )
 
 const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
+const encryptionSuffix = ".aes256"
 
 ///////////////////////////////////////////////////////////////////////////
 // Global Variables
@@ -137,15 +138,6 @@ type CommandSyntaxError struct {
 
 func (c CommandSyntaxError) Error() string {
 	return fmt.Sprintf("%s syntax error: %s", c.Cmd, c.Msg)
-}
-
-type driveQueryer interface {
-	getDriveFile(path string) (*drive.File, error)
-	isFolder(f *drive.File) bool
-}
-
-type driveDeleter interface {
-	deleteDriveFile(file *drive.File) error
 }
 
 // FileCloser is kind of a hack: it implements the io.ReadCloser
@@ -858,7 +850,7 @@ func getDriveFile(path string) (*drive.File, error) {
 		files := runDriveQuery(query)
 
 		if len(files) == 0 {
-			return nil, &fileNotFoundError{
+			return nil, fileNotFoundError{
 				path: path,
 			}
 		} else if len(files) > 1 {
@@ -1715,7 +1707,7 @@ func compileUploadFileTree(localPath, driveRoot string, encrypt bool) ([]LocalTo
 		}
 		drivePath := filepath.Clean(driveRoot + "/" + relPath)
 		if info.IsDir() == false && encrypt == true {
-			drivePath += ".aes256"
+			drivePath += encryptionSuffix
 		}
 		fileMappings = append(fileMappings, LocalToRemoteFileMapping{path, drivePath, info})
 		return nil
@@ -1729,18 +1721,18 @@ func compileUploadFileTree(localPath, driveRoot string, encrypt bool) ([]LocalTo
 // Downloading files and directory hierarchies from Google Drive
 
 // If a file is encrypted, it should both have the initialization vector used
-// to encrypt it stored as a Drive file property and have ".aes256" at the end
+// to encrypt it stored as a Drive file property and have encryptionSuffix at the end
 // of its filename. This function checks both of these and returns an error if
 // these indicators are inconsistent; otherwise, it returns true/false
 // accordingly.
 func isEncrypted(file *drive.File) (bool, error) {
 	if _, err := getProperty(file, "IV"); err == nil {
-		if strings.HasSuffix(file.Title, ".aes256") {
+		if strings.HasSuffix(file.Title, encryptionSuffix) {
 			return true, nil
 		}
 		return false, fmt.Errorf("has IV property but doesn't " +
 			"end with .aes256 suffix")
-	} else if strings.HasSuffix(file.Title, ".aes256") {
+	} else if strings.HasSuffix(file.Title, encryptionSuffix) {
 		// This could actually happen with an interrupted upload
 		// with 403 errors and the case where a file is created
 		// even though a 403 happened, if we don't get to delete
@@ -2057,7 +2049,7 @@ func createFileWriteCloser(localPath string, driveFile *drive.File) (io.WriteClo
 		return nil, err
 	}
 	if encrypted {
-		localPath = strings.TrimSuffix(localPath, ".aes256")
+		localPath = strings.TrimSuffix(localPath, encryptionSuffix)
 	}
 
 	// Create or overwrite the local file.
@@ -2446,24 +2438,49 @@ var rmSyntaxError CommandSyntaxError = CommandSyntaxError{
 		"Usage: rm [-r, -s] drive path",
 }
 
-type Remover struct {
+type driveQueryer interface {
+	getDriveFile() (*drive.File, error)
+	drivePath() string
+}
+
+type driveDeleter interface {
+	deleteDriveFile() error
+	trashDriveFile() (*drive.File, error)
+	isSkipTrash() bool
+}
+
+type RmCommand struct {
 	recursive     bool
 	skipTrash     bool
-	drivePath     string
+	path          string
+	svc           *drive.Service
 	queryService  driveQueryer
 	deleteService driveDeleter
+	driveFile     *drive.File
 }
 
-func (remover *Remover) getDriveFile(path string) (*drive.File, error) {
-	return nil, nil
+func (rmCmd *RmCommand) getDriveFile() (*drive.File, error) {
+	driveFile, err := getDriveFile(rmCmd.path)
+	if err == nil {
+		rmCmd.driveFile = driveFile
+	}
+	return driveFile, err
 }
 
-func (remover *Remover) isFolder(file *drive.File) bool {
-	return isFolder(file)
+func (rmCmd *RmCommand) deleteDriveFile() error {
+	return rmCmd.svc.Files.Delete(rmCmd.driveFile.Id).Do()
 }
 
-func (remover *Remover) deleteDriveFile(file *drive.File) error {
-	return nil
+func (rmCmd *RmCommand) trashDriveFile() (*drive.File, error) {
+	return rmCmd.svc.Files.Trash(rmCmd.driveFile.Id).Do()
+}
+
+func (rmCmd *RmCommand) drivePath() string {
+	return rmCmd.path
+}
+
+func (rmCmd *RmCommand) isSkipTrash() bool {
+	return rmCmd.skipTrash
 }
 
 func rm(args []string) {
@@ -2483,49 +2500,76 @@ func rm(args []string) {
 		}
 	}
 
-	remover := &Remover{
+	rmCmd := &RmCommand{
 		recursive: recursive,
 		skipTrash: skipTrash,
-		drivePath: drivePath,
+		path:      drivePath,
+		svc:       drivesvc,
 	}
 
-	if err := checkRmArguments(drivePath, recursive, skipTrash, remover); err != nil {
+	if err := checkRmPossible(rmCmd, recursive); err != nil {
+		if _, ok := err.(fileNotFoundError); ok {
+			// if there's an encrypted version on drive, let the user know and exit
+			oldPath := rmCmd.path
+			rmCmd.path += encryptionSuffix
+			if err := checkRmPossible(rmCmd, recursive); err == nil {
+				printErrorAndExit(fmt.Errorf("skicka rm: Found no file with path %s, but found encrypted version with path %s \n"+
+					"If you would like to rm the encrypted version, re-run the command adding the %s extension onto the path.",
+					oldPath, rmCmd.path, encryptionSuffix))
+			}
+		}
 		printErrorAndExit(err)
 	}
 
-	//mediator.removeFileAtDrivePath(drivePath, recursive, skipTrash)
+	for nTries := 5; ; nTries += 1 {
+		if err := deleteDriveFile(rmCmd); err != nil {
+			if err = tryToHandleDriveAPIError(err, 1); err != nil {
+				printErrorAndExit(err)
+			}
+		}
+	}
 }
 
-func checkRmArguments(drivePath string, recursive, skipTrash bool, queryer driveQueryer) error {
-	if drivePath == "" {
+func deleteDriveFile(deleter driveDeleter) error {
+	skipTrash := deleter.isSkipTrash()
+	if skipTrash {
+		// do delete
+		return deleter.deleteDriveFile()
+	} else {
+		// do trash
+		_, err := deleter.trashDriveFile()
+		return err
+	}
+}
+
+func checkRmPossible(queryer driveQueryer, recursive bool) error {
+	if queryer.drivePath() == "" {
 		return rmSyntaxError
 	}
 
-	driveFile, err := queryer.getDriveFile(drivePath)
+	invokingCmd := "skicka rm"
+
+	driveFile, err := queryer.getDriveFile()
 	if err != nil {
 		switch err.(type) {
 		case fileNotFoundError:
 			return fileNotFoundError{
-				path:        drivePath,
-				invokingCmd: "rm",
+				path:        queryer.drivePath(),
+				invokingCmd: invokingCmd,
 			}
 		default:
 			return err
 		}
 	}
 
-	if !recursive && queryer.isFolder(driveFile) {
+	if !recursive && isFolder(driveFile) {
 		return removeDirectoryError{
-			path:        drivePath,
-			invokingCmd: "rm",
+			path:        queryer.drivePath(),
+			invokingCmd: invokingCmd,
 		}
 	}
 
 	return nil
-}
-
-func removeFileAtDrivePath(drivePath string, recursive, skipTrash bool) {
-	fmt.Printf("drivePath: %s, recursive: %v, skipTrash: %v\n", drivePath, recursive, skipTrash)
 }
 
 func ls(args []string) {

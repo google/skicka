@@ -75,158 +75,168 @@ func TestThatProgressBarCanRewindProgress(t *testing.T) {
 	}
 }
 
-type notExistsQueryer int
+type notExistsQueryer struct {
+	path      string
+	recursive bool
+}
 
-func (q notExistsQueryer) getDriveFile(path string) (*drive.File, error) {
+func (q notExistsQueryer) getDriveFile() (*drive.File, error) {
 	return nil, fileNotFoundError{
-		path: path,
+		path: q.path,
 	}
 }
 
-func (q notExistsQueryer) isFolder(file *drive.File) bool {
-	return false
+func (q notExistsQueryer) drivePath() string {
+	return q.path
 }
 
-type existsQueryer int
+type existsQueryer notExistsQueryer
 
-func (q existsQueryer) getDriveFile(path string) (*drive.File, error) {
+func (q existsQueryer) getDriveFile() (*drive.File, error) {
+	var mimeType string
+	if strings.HasSuffix(q.path, "dir") {
+		mimeType = "application/vnd.google-apps.folder"
+	}
 	return &drive.File{
-		MimeType: path,
+		MimeType: mimeType,
 	}, nil
 }
 
-func (q existsQueryer) isFolder(file *drive.File) bool {
-	return strings.HasSuffix(file.MimeType, "dir")
+func (q existsQueryer) drivePath() string {
+	return q.path
 }
 
 func TestRmArgumentErrorHandling(t *testing.T) {
-	recursive, skipTrash := false, false
+	recursive := false
 	driveFile := "/fake/drive/file"
 	driveDir := "/fake/drive/dir"
+	noSuchFileErrorMessage := fmt.Sprintf("skicka rm: %s: No such file or directory", driveFile)
+	noSuchDirErrorMessage := fmt.Sprintf("skicka rm: %s: No such file or directory", driveDir)
+	isADirectoryErrorMessage := fmt.Sprintf("skicka rm: %s: is a directory", driveDir)
 
-	var notExister notExistsQueryer = 2
-	var exister existsQueryer = 2
-	noSuchFileErrorMessage := fmt.Sprintf("rm: %s: No such file or directory", driveFile)
-	noSuchDirErrorMessage := fmt.Sprintf("rm: %s: No such file or directory", driveDir)
-	isADirectoryErrorMessage := fmt.Sprintf("rm: %s: is a directory", driveDir)
+	var notExister notExistsQueryer = notExistsQueryer{
+		recursive: recursive,
+	}
 
-	//There are 16 possible (valid) variations of the parameters, these are:
-	//R: recursive, S: skip trash, E: existence of file, [F/D]: file or directory
-	//		| !R | !S | !E |  F |
+	var exister existsQueryer = existsQueryer{
+		recursive: recursive,
+	}
+
+	//There are 8 possible (valid) variations of the parameters, these are:
+	//R: recursive, E: existence of file, [F/D]: file or directory
+	//		| !R | !E |  F |
 	//		Should fail with error message: rm: <drive path>: no such file or directory
+	notExister.path = driveFile
 	expectErrorWithMessage(t,
-		checkRmArguments(driveFile, recursive, skipTrash, notExister),
+		checkRmPossible(notExister, recursive),
 		noSuchFileErrorMessage)
 
-	//		| !R | !S | !E |  D |
+	//		| !R | !E |  D |
 	//		Should fail with error message: rm: <drive path>: no such file or directory
+	notExister.path = driveDir
 	expectErrorWithMessage(t,
-		checkRmArguments(driveDir, recursive, skipTrash, notExister),
+		checkRmPossible(notExister, recursive),
 		noSuchDirErrorMessage)
 
-	//		| !R | !S |  E |  F |
+	//		| !R |  E |  F |
 	//		Should succeed
-	if err := checkRmArguments(driveFile, recursive, skipTrash, exister); err != nil {
+	exister.path = driveFile
+	if err := checkRmPossible(exister, recursive); err != nil {
 		t.Fatalf("An error occurred when it shouldn't have: %v", err)
 	}
 
-	//		| !R | !S |  E |  D |
+	//		| !R |  E |  D |
 	//		Should fail with error message; rm: <drive path>: is a directory
+	exister.path = driveDir
 	expectErrorWithMessage(t,
-		checkRmArguments(driveDir, recursive, skipTrash, exister),
+		checkRmPossible(exister, recursive),
 		isADirectoryErrorMessage)
 
-	//		| !R |  S | !E |  F |
-	//		Should fail with error message: rm: <drive path>: no such file or directory
-	skipTrash = true
-	expectErrorWithMessage(t,
-		checkRmArguments(driveFile, recursive, skipTrash, notExister),
-		noSuchFileErrorMessage)
-
-	//		| !R |  S | !E |  D |
-	//		Should fail with error message: rm: <drive path>: no such file or directory
-	expectErrorWithMessage(t,
-		checkRmArguments(driveDir, recursive, skipTrash, notExister),
-		noSuchDirErrorMessage)
-
-	//		| !R |  S |  E |  F |
-	//		Should succeed
-	if err := checkRmArguments(driveFile, recursive, skipTrash, exister); err != nil {
-		t.Fatalf("An error occurred when it shouldn't have: %v", err)
-	}
-
-	//		| !R |  S |  E |  D |
-	//		Should fail with error message; rm: <drive path>: is a directory
-	expectErrorWithMessage(t,
-		checkRmArguments(driveDir, recursive, skipTrash, exister),
-		isADirectoryErrorMessage)
-
-	//		|  R | !S | !E |  F |
+	//		|  R | !E |  F |
 	//		Should fail with error message: rm: <drive path>: no such file or directory
 	recursive = true
-	skipTrash = false
+	notExister.path = driveFile
 	expectErrorWithMessage(t,
-		checkRmArguments(driveFile, recursive, skipTrash, notExister),
+		checkRmPossible(notExister, recursive),
 		noSuchFileErrorMessage)
 
-	//		|  R | !S | !E |  D |
+	//		|  R | !E |  D |
 	//		Should fail with error message: rm: <drive path>: no such file or directory
+	notExister.path = driveDir
 	expectErrorWithMessage(t,
-		checkRmArguments(driveDir, recursive, skipTrash, notExister),
+		checkRmPossible(notExister, recursive),
 		noSuchDirErrorMessage)
 
-	//		|  R | !S |  E |  F |
+	//		|  R |  E |  F |
 	//		Should succeed
-	if err := checkRmArguments(driveFile, recursive, skipTrash, exister); err != nil {
+	exister.path = driveFile
+	if err := checkRmPossible(exister, recursive); err != nil {
 		t.Fatalf("An error occurred when it shouldn't have: %v", err)
 	}
 
-	//		|  R | !S |  E |  D |
+	//		|  R |  E |  D |
 	//		Should succeed
-	if err := checkRmArguments(driveDir, recursive, skipTrash, exister); err != nil {
-		t.Fatalf("An error occurred when it shouldn't have: %v", err)
-	}
-
-	skipTrash = true
-	//		|  R |  S | !E |  F |
-	//		Should fail with error message: rm: <drive path>: no such file or directory
-	expectErrorWithMessage(t,
-		checkRmArguments(driveFile, recursive, skipTrash, notExister),
-		noSuchFileErrorMessage)
-
-	//		|  R |  S | !E |  D |
-	//		Should fail with error message: rm: <drive path>: no such file or directory
-	expectErrorWithMessage(t,
-		checkRmArguments(driveDir, recursive, skipTrash, notExister),
-		noSuchDirErrorMessage)
-
-	//		|  R |  S |  E |  F |
-	//		Should succeed
-	if err := checkRmArguments(driveFile, recursive, skipTrash, exister); err != nil {
-		t.Fatalf("An error occurred when it shouldn't have: %v", err)
-	}
-
-	//		|  R |  S |  E |  D |
-	//		Should succeed
-	if err := checkRmArguments(driveDir, recursive, skipTrash, exister); err != nil {
+	exister.path = driveDir
+	if err := checkRmPossible(exister, recursive); err != nil {
 		t.Fatalf("An error occurred when it shouldn't have: %v", err)
 	}
 }
 
 func TestEmptyDrivePathArgument(t *testing.T) {
-	var exister existsQueryer = 2
-	err := checkRmArguments("", true, true, exister)
+	var exister existsQueryer = existsQueryer{
+		path:      "",
+		recursive: false,
+	}
+
+	err := checkRmPossible(exister, false)
 	if _, ok := err.(CommandSyntaxError); !ok {
-		t.Fatalf("checkRmArguments should return a CommandSyntaxError when path is empty "+
+		t.Fatalf("checkRmPossible should return a CommandSyntaxError when path is empty "+
 			"but returned: %v", err)
 	}
 	expectErrorWithMessage(t, err, rmSyntaxError.Error())
 }
 
+type deleter struct {
+	deleteCalled, trashCalled, skipTrash bool
+}
+
+func (d *deleter) deleteDriveFile() error {
+	d.deleteCalled = true
+	return nil
+}
+
+func (d *deleter) trashDriveFile() (*drive.File, error) {
+	d.trashCalled = true
+	return nil, nil
+}
+
+func (d *deleter) isSkipTrash() bool {
+	return d.skipTrash
+}
+
+func TestDeleteFuncDiffentiatesBetweenDeleteAndTrash(t *testing.T) {
+	d := new(deleter)
+	d.skipTrash = true
+	deleteDriveFile(d)
+
+	if d.deleteCalled != true {
+		t.Fatal("When skipTrash is true, then driveDeleter's delete function should " +
+			"be called, but it wasn't")
+	}
+
+	d = new(deleter)
+	deleteDriveFile(d)
+
+	if d.trashCalled != true {
+		t.Fatal("When skipTrash is false, then driveDeleter's trash function should " +
+			"be called, but it wasn't")
+	}
+}
+
 func expectErrorWithMessage(t *testing.T, err error, msg string) {
 	if err == nil || err.Error() != msg {
 		runtimeDebug.PrintStack()
-		t.Fatalf("An error should have been returned with the message %s, but %v was returned",
+		t.Fatalf("An error should have been returned with the message %s, but this was returned: %v",
 			msg, err)
 	}
 }
