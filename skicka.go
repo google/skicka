@@ -529,9 +529,8 @@ func getRandomBytes(n int) []byte {
 func generateKey() {
 	passphrase := os.Getenv(passphraseEnvironmentVariable)
 	if passphrase == "" {
-		fmt.Fprintf(os.Stderr, "skicka: SKICKA_PASSPHRASE "+
-			"environment variable not set.\n")
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: SKICKA_PASSPHRASE " +
+			"environment variable not set.\n"))
 	}
 
 	// Derive a 64-byte hash from the passphrase using PBKDF2 with 65536
@@ -798,8 +797,7 @@ func createDriveFolder(title string, mode os.FileMode, modTime time.Time,
 func getDriveFile(path string) (*drive.File, error) {
 	parent, err := getFileById("root")
 	if err != nil {
-		log.Fatalf("unable to get Drive root directory: %v", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("unable to get Drive root directory: %v", err)
 	}
 
 	dirs := strings.Split(path, "/")
@@ -870,15 +868,13 @@ func getFilesAtRemotePath(path string, recursive, includeBase,
 		if !mustExist {
 			return existingFiles
 		}
-		fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %v\n", err))
 	}
 
 	if isFolder(file) {
 		err := getFolderContents(path, file, recursive, existingFiles)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
-			os.Exit(1)
+			printErrorAndExit(fmt.Errorf("skicka: %v\n", err))
 		}
 		if includeBase {
 			existingFiles[path] = file
@@ -1310,8 +1306,7 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 			// parent folder definitely should have been
 			// created by now, and we can't proceed without
 			// it...
-			fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
-			os.Exit(1)
+			printErrorAndExit(fmt.Errorf("skicka: %v\n", err))
 		}
 	}
 
@@ -1407,8 +1402,7 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 
 func checkFatalError(err error, message string) {
 	if err != nil {
-		fmt.Fprintf(os.Stderr, message, err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf(message, err))
 	}
 }
 
@@ -1475,8 +1469,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 		err = syncFileUp(file, encrypt, existingFiles, progressBar)
 		if err != nil {
 			nUploadErrors++
-			fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", file.LocalPath, err)
-			os.Exit(1)
+			printErrorAndExit(fmt.Errorf("skicka: %s: %v\n", file.LocalPath, err))
 		}
 		updateActiveMemory()
 	}
@@ -1872,9 +1865,8 @@ func syncHierarchyDown(drivePath string, localPath string,
 	// Both drivePath and localPath must be directories, or both must be files.
 	if stat, err := os.Stat(localPath); err == nil && len(filesOnDrive) == 1 &&
 		stat.IsDir() != isFolder(filesOnDrive[driveFilenames[0]]) {
-		fmt.Fprintf(os.Stderr, "skicka: %s: remote and local must both be directory or both be files.\n",
-			localPath)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %s: remote and local must both be directory or both be files.\n",
+			localPath))
 	}
 
 	nDownloadErrors := int32(0)
@@ -1897,9 +1889,8 @@ func syncHierarchyDown(drivePath string, localPath string,
 		} else {
 			needsDownload, err := fileNeedsDownload(filePath, driveFilename, driveFile, ignoreTimes)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "skicka: error determining if file %s should "+
-					"be downloaded: %v\n", driveFilename, err)
-				os.Exit(1)
+				printErrorAndExit(fmt.Errorf("skicka: error determining if file %s should "+
+					"be downloaded: %v\n", driveFilename, err))
 			}
 			if needsDownload {
 				nBytesToDownload += driveFile.FileSize
@@ -2006,6 +1997,16 @@ func addErrorAndPrintMessage(totalErrors *int32, message string, err error) {
 	atomic.AddInt32(totalErrors, 1)
 }
 
+func printErrorAndExit(err error) {
+	fmt.Fprintln(os.Stderr, err)
+	os.Exit(1)
+}
+
+func printUsageAndExit() {
+	usage()
+	os.Exit(1)
+}
+
 func createFileWriteCloser(localPath string, driveFile *drive.File) (io.WriteCloser, error) {
 	encrypted, err := isEncrypted(driveFile)
 	if err != nil {
@@ -2089,15 +2090,13 @@ func createConfigFile(filename string) {
 	if _, err := os.Stat(filename); os.IsNotExist(err) {
 		err := ioutil.WriteFile(filename, []byte(contents), 0600)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "skicka: unable to create "+
-				"configuration file %s: %v\n", filename, err)
-			os.Exit(1)
+			printErrorAndExit(fmt.Errorf("skicka: unable to create "+
+				"configuration file %s: %v\n", filename, err))
 		}
 		fmt.Printf("skicka: created configuration file %s.\n", filename)
 	} else {
-		fmt.Fprintf(os.Stderr, "skicka: %s: file already exists; "+
-			"leaving it alone.\n", filename)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %s: file already exists; "+
+			"leaving it alone.\n", filename))
 	}
 }
 
@@ -2150,27 +2149,23 @@ func checkConfigValidity() {
 func readConfigFile(filename string) {
 	filename, err := tildeExpand(filename)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: %s: error expanding configuration "+
-			"file path: %v\n", filename, err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %s: error expanding configuration "+
+			"file path: %v\n", filename, err))
 	}
 
 	if info, err := os.Stat(filename); err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %v\n", err))
 	} else if goperms := info.Mode() & ((1 << 6) - 1); goperms != 0 {
-		fmt.Fprintf(os.Stderr, "skicka: %s: permissions of configuration file "+
+		printErrorAndExit(fmt.Errorf("skicka: %s: permissions of configuration file "+
 			"allow group/other access. Your secrets are at risk.\n",
-			filename)
-		os.Exit(1)
+			filename))
 	}
 
 	err = gcfg.ReadFileInto(&config, filename)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", filename, err)
-		fmt.Fprintf(os.Stderr, "skicka: you may want to run \"skicka "+
-			"init\" to create an initial configuration file.\n")
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: you may want to run \"skicka " +
+			"init\" to create an initial configuration file.\n"))
 	}
 	checkConfigValidity()
 }
@@ -2236,8 +2231,7 @@ General options valid for all commands:
 
 func du() {
 	if len(flag.Args()) != 2 {
-		usage()
-		os.Exit(1)
+		printUsageAndExit()
 	}
 	drivePath := filepath.Clean(flag.Arg(1))
 
@@ -2274,20 +2268,17 @@ func du() {
 
 func cat() {
 	if len(flag.Args()) != 2 {
-		usage()
-		os.Exit(1)
+		printUsageAndExit()
 	}
 	filename := filepath.Clean(flag.Arg(1))
 
 	file, err := getDriveFile(filename)
 	timeDelta("Get file descriptors from Google Drive")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
-		os.Exit(1)
+		printErrorAndExit(err)
 	}
 	if isFolder(file) {
-		fmt.Fprintf(os.Stderr, "skicka: %s: is a directory.\n", filename)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %s: is a directory.\n", filename))
 	}
 
 	contentsReader, err := getDriveFileContentsReader(file)
@@ -2295,14 +2286,12 @@ func cat() {
 		defer contentsReader.Close()
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", filename, err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %s: %v\n", filename, err))
 	}
 
 	_, err = io.Copy(os.Stdout, contentsReader)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", filename, err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %s: %v\n", filename, err))
 	}
 }
 
@@ -2313,16 +2302,14 @@ func mkdir() {
 		if flag.Arg(i) == "-p" {
 			makeIntermediate = true
 		} else {
-			usage()
-			os.Exit(1)
+			printUsageAndExit()
 		}
 	}
 	drivePath := filepath.Clean(flag.Arg(i))
 
 	parent, err := getFileById("root")
 	if err != nil {
-		log.Fatalf("unable to get Drive root directory: %v", err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("unable to get Drive root directory: %v", err))
 	}
 
 	dirs := strings.Split(drivePath, "/")
@@ -2343,9 +2330,8 @@ func mkdir() {
 		files := runDriveQuery(query)
 
 		if len(files) > 1 {
-			fmt.Fprintf(os.Stderr, "skicka: %s: multiple files with "+
-				"this name", pathSoFar)
-			os.Exit(1)
+			printErrorAndExit(fmt.Errorf("skicka: %s: multiple files with "+
+				"this name", pathSoFar))
 		}
 
 		if len(files) == 0 {
@@ -2356,26 +2342,19 @@ func mkdir() {
 				parent, err = createDriveFolder(dir, 0755, time.Now(), parent)
 				debug.Printf("Creating folder %s", pathSoFar)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "skicka: %s: %v\n",
-						pathSoFar, err)
-					os.Exit(1)
+					printErrorAndExit(fmt.Errorf("skicka: %s: %v\n", pathSoFar, err))
 				}
 			} else {
-				fmt.Fprintf(os.Stderr, "skicka: %s: no such "+
-					"directory\n", pathSoFar)
-				os.Exit(1)
+				printErrorAndExit(fmt.Errorf("skicka: %s: no such "+
+					"directory\n", pathSoFar))
 			}
 		} else {
 			// Found it; if it's a folder this is good, unless it's
 			// the folder we were supposed to be creating.
 			if index+1 == nDirs && !makeIntermediate {
-				fmt.Fprintf(os.Stderr, "skicka: %s: already "+
-					"exists\n", pathSoFar)
-				os.Exit(1)
+				printErrorAndExit(fmt.Errorf("skicka: %s: already exists\n", pathSoFar))
 			} else if !isFolder(files[0]) {
-				fmt.Fprintf(os.Stderr, "skicka: %s: not a "+
-					"folder\n", pathSoFar)
-				os.Exit(1)
+				printErrorAndExit(fmt.Errorf("skicka: %s: not a folder\n", pathSoFar))
 			} else {
 				parent = files[0]
 			}
@@ -2423,8 +2402,7 @@ func ls() {
 		} else if drivePath == "" {
 			drivePath = flag.Arg(i)
 		} else {
-			usage()
-			os.Exit(1)
+			printUsageAndExit()
 		}
 	}
 	if drivePath == "" {
@@ -2487,8 +2465,7 @@ func upload() {
 	encrypt := false
 
 	if len(flag.Args()) < 3 {
-		usage()
-		os.Exit(1)
+		printUsageAndExit()
 	}
 
 	i := 1
@@ -2499,8 +2476,7 @@ func upload() {
 		case "-encrypt":
 			encrypt = true
 		default:
-			usage()
-			os.Exit(1)
+			printUsageAndExit()
 		}
 	}
 
@@ -2509,8 +2485,7 @@ func upload() {
 
 	// Make sure localPath exists and is a directory.
 	if _, err := os.Stat(localPath); err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %v\n", err))
 	}
 
 	recursive := true
@@ -2537,8 +2512,7 @@ func upload() {
 
 func download() {
 	if len(flag.Args()) < 3 {
-		usage()
-		os.Exit(1)
+		printUsageAndExit()
 	}
 
 	ignoreTimes := false
@@ -2548,8 +2522,7 @@ func download() {
 		case "-ignore-times":
 			ignoreTimes = true
 		default:
-			usage()
-			os.Exit(1)
+			printUsageAndExit()
 		}
 	}
 
@@ -2588,8 +2561,7 @@ func main() {
 	flag.Parse()
 
 	if len(flag.Args()) == 0 {
-		usage()
-		os.Exit(1)
+		printUsageAndExit()
 	}
 
 	verbose = debugging(*vb || *dbg)
@@ -2598,9 +2570,8 @@ func main() {
 	var err error
 	*configFilename, err = tildeExpand(*configFilename)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: %s: error expanding "+
-			"config path: %v\n", *cachefile, err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %s: error expanding "+
+			"config path: %v\n", *cachefile, err))
 	}
 
 	cmd := flag.Arg(0)
@@ -2620,9 +2591,8 @@ func main() {
 
 	*cachefile, err = tildeExpand(*cachefile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: %s: error expanding "+
-			"cachefile path: %v\n", *cachefile, err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %s: error expanding "+
+			"cachefile path: %v\n", *cachefile, err))
 	}
 
 	readConfigFile(*configFilename)
@@ -2630,9 +2600,8 @@ func main() {
 	err = createDriveClient(config.Google.ClientId, config.Google.ClientSecret,
 		*cachefile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: error creating Google Drive "+
-			"client: %v\n", err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: error creating Google Drive "+
+			"client: %v\n", err))
 	}
 
 	switch cmd {
@@ -2649,7 +2618,6 @@ func main() {
 	case "download":
 		download()
 	default:
-		usage()
-		os.Exit(1)
+		printUsageAndExit()
 	}
 }
