@@ -1400,7 +1400,7 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 			reader = contentsReader
 
 			if pb != nil {
-				countingReader := &ByteCountingReader{
+				countingReader = &ByteCountingReader{
 					R: reader,
 				}
 				reader = io.TeeReader(countingReader, pb)
@@ -1420,6 +1420,8 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 					pb.Add64(int64(0 - countingReader.bytesRead))
 				}
 			} else {
+				debug.Printf("%s: giving up due to error: %s",
+					fileMapping.LocalPath, err)
 				// This file won't be uploaded, so subtract the expected progress
 				// from the total expected bytes
 				if pb != nil {
