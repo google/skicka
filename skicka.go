@@ -2250,7 +2250,7 @@ Commands and their options are:
              Arguments: [-r, -s] <drive path>,
              where files and directories are recursively removed if -r is specified
              and the google drive trash is skipped if -s is specified. The default 
-             behavior is to file if the drive path specified is a directory and -r is 
+             behavior is to fail if the drive path specified is a directory and -r is
              not specified, and to send files to the trash instead of permanently
              deleting them.
 
@@ -2525,7 +2525,7 @@ func rm(args []string) {
 
 	for nTries := 5; ; nTries += 1 {
 		if err := deleteDriveFile(rmCmd); err != nil {
-			if err = tryToHandleDriveAPIError(err, 1); err != nil {
+			if err = tryToHandleDriveAPIError(err, nTries); err != nil {
 				printErrorAndExit(err)
 			}
 		}
