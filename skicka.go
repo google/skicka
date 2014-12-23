@@ -996,6 +996,10 @@ func prepareUploadPUT(driveFile *drive.File, contentsReader io.Reader,
 	contentsHeader := make([]byte, 512)
 	headerLength, err := contentsReader.Read(contentsHeader)
 	if err != nil {
+		if err.Error() == "EOF" {
+			// Empty file; this is fine, and we're done.
+			return nil, nil
+		}
 		return nil, err
 	}
 	contentType := http.DetectContentType(contentsHeader)
@@ -1030,6 +1034,11 @@ func uploadFileContents(driveFile *drive.File, contentsReader io.Reader,
 	req, err := prepareUploadPUT(driveFile, contentsReader, length)
 	if err != nil {
 		return err
+	}
+	if req == nil {
+		// Empty file--we're done.
+		atomic.AddInt64(&stats.DriveFilesUpdated, 1)
+		return nil
 	}
 
 	// And send it off...
@@ -1382,7 +1391,7 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 					pb.Add64(int64(0 - countingReader.bytesRead))
 				}
 			} else {
-				debug.Printf("%s: giving up due to error: %s",
+				debug.Printf("%s: giving up due to error: %v",
 					fileMapping.LocalPath, err)
 				// This file won't be uploaded, so subtract the expected progress
 				// from the total expected bytes
