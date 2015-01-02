@@ -1381,11 +1381,14 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 		// in interesting ways if it does happen.
 		existingDriveFiles[fileMapping.RemotePath] = driveFile
 	} else {
-		driveFile, err = createDriveFile(baseName, fileMapping.LocalFileInfo.Mode(),
-			fileMapping.LocalFileInfo.ModTime(), encrypt, parentFile)
-		if err != nil {
-			return err
+		if driveFile, ok = existingDriveFiles[fileMapping.RemotePath]; !ok {
+			driveFile, err = createDriveFile(baseName, fileMapping.LocalFileInfo.Mode(),
+				fileMapping.LocalFileInfo.ModTime(), encrypt, parentFile)
+			if err != nil {
+				return err
+			}
 		}
+
 		var iv []byte
 		if encrypt {
 			iv, err = getInitializationVector(driveFile)
@@ -1546,8 +1549,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 
 			localFile := fileMappings[index]
 
-			err = syncFileUp(localFile, encrypt,
-				existingFiles, progressBar)
+			err = syncFileUp(localFile, encrypt, existingFiles, progressBar)
 			if err != nil {
 				atomic.AddInt32(&nUploadErrors, 1)
 				fmt.Fprintf(os.Stderr, "skicka: %s: %v\n",
