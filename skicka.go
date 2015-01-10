@@ -2481,10 +2481,12 @@ func (rmCmd *RmCommand) getDriveFile() (*drive.File, error) {
 }
 
 func (rmCmd *RmCommand) deleteDriveFile() error {
+	debug.Printf("Deleting file %s (id %s)", rmCmd.path, rmCmd.driveFile.Id)
 	return rmCmd.svc.Files.Delete(rmCmd.driveFile.Id).Do()
 }
 
 func (rmCmd *RmCommand) trashDriveFile() (*drive.File, error) {
+	debug.Printf("Trashing file %s (id %s)", rmCmd.path, rmCmd.driveFile.Id)
 	return rmCmd.svc.Files.Trash(rmCmd.driveFile.Id).Do()
 }
 
@@ -2535,10 +2537,12 @@ func rm(args []string) {
 	}
 
 	for nTries := 5; ; nTries += 1 {
-		if err := deleteDriveFile(rmCmd); err != nil {
-			if err = tryToHandleDriveAPIError(err, nTries); err != nil {
-				printErrorAndExit(err)
-			}
+		err := deleteDriveFile(rmCmd)
+		if err == nil {
+			return
+		}
+		if err = tryToHandleDriveAPIError(err, nTries); err != nil {
+			printErrorAndExit(err)
 		}
 	}
 }
