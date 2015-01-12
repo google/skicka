@@ -1084,7 +1084,8 @@ func getResumableUploadURI(driveFile *drive.File, contentType string,
 	params := make(url.Values)
 	params.Set("uploadType", "resumable")
 
-	urls := fmt.Sprintf("https://www.googleapis.com/upload/drive/v2/files/%s", driveFile.Id)
+	urls := fmt.Sprintf("https://www.googleapis.com/upload/drive/v2/files/%s",
+		driveFile.Id)
 	urls += "?" + params.Encode()
 
 	body, err := googleapi.WithoutDataWrapper.JSONReader(driveFile)
@@ -1114,8 +1115,8 @@ func getResumableUploadURI(driveFile *drive.File, contentType string,
 			}
 			if resp != nil {
 				b, _ := ioutil.ReadAll(resp.Body)
-				debug.Printf("getResumableUploadURI status %d\nResp: %+v\nBody: %s",
-					resp.StatusCode, *resp, b)
+				debug.Printf("getResumableUploadURI status %d\n"+
+					"Resp: %+v\nBody: %s", resp.StatusCode, *resp, b)
 			}
 			if ntries == 5 {
 				// Give up...
@@ -1127,8 +1128,12 @@ func getResumableUploadURI(driveFile *drive.File, contentType string,
 	}
 }
 
+// In certain error cases, we need to go back and query Drive as to how
+// much of a file has been successfully uploaded (and thence where we
+// should start for the next chunk.)  This function generates that query
+// and updates the provided *currentOffset parameter with the result.
 func getCurrentChunkStart(sessionURI string, contentLength int64,
-	start *int64) (HTTPResponseResult, error) {
+	currentOffset *int64) (HTTPResponseResult, error) {
 	var err error
 	for r := 0; r < 6; r++ {
 		req, _ := http.NewRequest("PUT", sessionURI, nil)
@@ -1137,38 +1142,37 @@ func getCurrentChunkStart(sessionURI string, contentLength int64,
 		req.ContentLength = 0
 		req.Header.Set("User-Agent", "skicka/0.1")
 		resp, err := oAuthTransport.RoundTrip(req)
-		/*
-		   req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", oAuthTransport.Token.AccessToken))
-		   debug.Printf("REQ headers: %+v", req.Header)
-		   debug.Printf("Session URI for bytes %s", sessionURI)
-		   resp, err := http.DefaultTransport.RoundTrip(req)
-		*/
 
-		if resp != nil {
-			defer resp.Body.Close()
-		}
-		if resp != nil {
-			b, _ := ioutil.ReadAll(resp.Body)
-			debug.Printf("Get current chunk start err %v resp status %d, body %s\nRESP %v\n",
-				err, resp.StatusCode, b, *resp)
-		} else {
+		if resp == nil {
 			debug.Printf("get current chunk start err %v\n", err)
+			exponentialBackoff(r, resp, err)
+			continue
 		}
-		if resp != nil && (resp.StatusCode == 200 || resp.StatusCode == 201) {
+
+		defer resp.Body.Close()
+		b, _ := ioutil.ReadAll(resp.Body)
+		debug.Printf("Get current chunk start err %v resp status %d, "+
+			"body %s\nRESP %v\n",
+			err, resp.StatusCode, b, *resp)
+
+		if resp.StatusCode == 200 || resp.StatusCode == 201 {
 			// 200 or 201 here says we're actually all done
-			debug.Printf("All done: %d from get content-range response", resp.StatusCode)
+			debug.Printf("All done: %d from get content-range response",
+				resp.StatusCode)
 			return Success, nil
-		} else if resp != nil && resp.StatusCode == 308 {
-			*start = updateStartFromResponse(resp)
-			debug.Printf("Updated start to %d after 308 from get content-range...", *start)
+		} else if resp.StatusCode == 308 {
+			*currentOffset = updateStartFromResponse(resp)
+			debug.Printf("Updated start to %d after 308 from get "+
+				"content-range...", *currentOffset)
 			return Retry, nil
-		} else if resp != nil && resp.StatusCode == 401 {
+		} else if resp.StatusCode == 401 {
 			debug.Printf("XX Trying OAuth2 token refresh.")
 			debug.Printf("Token was %s", oAuthTransport.Token.AccessToken)
 			for r := 0; r < 6; r++ {
 				if err = oAuthTransport.Refresh(); err == nil {
 					debug.Printf("XX refresh success3")
-					debug.Printf("Refreshed token is now %s", oAuthTransport.Token.AccessToken)
+					debug.Printf("Refreshed token is now %s",
+						oAuthTransport.Token.AccessToken)
 					// Now once again try the PUT...
 					break
 				} else {
@@ -1177,7 +1181,6 @@ func getCurrentChunkStart(sessionURI string, contentLength int64,
 				}
 			}
 		} else {
-			exponentialBackoff(r, resp, err)
 		}
 	}
 	debug.Printf("couldn't recover from 503...")
@@ -1216,12 +1219,13 @@ func handleResumableUploadResponse(resp *http.Response, err error, driveFile *dr
 	// Serious error (e.g. connection reset) where we didn't even get a
 	// HTTP response back from the server.  Try again (a few times).
 	if err != nil {
+		debug.Printf("handleResumableUploadResponse error %v", err)
 		exponentialBackoff(*ntries, resp, err)
 		return Retry, nil
 	}
 
-	debug.Printf("got status %d from chunk for file %s", resp.StatusCode,
-		driveFile.Id)
+	debug.Printf("got status %d from chunk for file %s\n", resp.StatusCode,
+		driveFile.Id, resp)
 
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode <= 299:
@@ -1302,7 +1306,7 @@ func uploadFileContentsResumable(driveFile *drive.File, contentsReader io.Reader
 	for currentOffset, ntries := int64(0), 0; currentOffset < contentLength; ntries++ {
 		end := currentOffset + int64(chunkSize)
 		if end > contentLength {
-			end = contentLength - currentOffset
+			end = contentLength
 		}
 		debug.Printf("%s: uploading chunk %d - %d...", driveFile.Title,
 			currentOffset, end)
@@ -1726,7 +1730,8 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 
 	if fileMapping.LocalFileInfo.IsDir() {
 		driveFile, _ = createDriveFolder(baseName,
-			fileMapping.LocalFileInfo.Mode(), fileMapping.LocalFileInfo.ModTime(), parentFile)
+			fileMapping.LocalFileInfo.Mode(), fileMapping.LocalFileInfo.ModTime(),
+			parentFile)
 		atomic.AddInt64(&stats.UploadBytes, fileMapping.LocalFileInfo.Size())
 		pb.Add64(fileMapping.LocalFileInfo.Size())
 		verbose.Printf("Created Google Drive folder %s", fileMapping.RemotePath)
@@ -1746,7 +1751,8 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 		existingDriveFiles[fileMapping.RemotePath] = driveFile
 	} else {
 		if driveFile, ok = existingDriveFiles[fileMapping.RemotePath]; !ok {
-			driveFile, err = createDriveFile(baseName, fileMapping.LocalFileInfo.Mode(),
+			driveFile, err = createDriveFile(baseName,
+				fileMapping.LocalFileInfo.Mode(),
 				fileMapping.LocalFileInfo.ModTime(), encrypt, parentFile)
 			if err != nil {
 				return err
@@ -1792,14 +1798,16 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 				debug.Printf("%s: got retry http error--retrying: %s",
 					fileMapping.LocalPath, re.Error())
 				if pb != nil {
-					// The "progress" made so far on this file should be rolled back
+					// The "progress" made so far on
+					// this file should be rolled back
 					pb.Add64(int64(0 - countingReader.bytesRead))
 				}
 			} else {
 				debug.Printf("%s: giving up due to error: %v",
 					fileMapping.LocalPath, err)
-				// This file won't be uploaded, so subtract the expected progress
-				// from the total expected bytes
+				// This file won't be uploaded, so subtract
+				// the expected progress from the total
+				// expected bytes
 				if pb != nil {
 					pb.Add64(int64(0 - countingReader.bytesRead))
 					pb.Total -= length
