@@ -161,6 +161,11 @@ func (fc *FileCloser) Close() error {
 // uploads, where we may need to rewind a bit after a failed chunk, but
 // definitely don't want to pay the overhead of having the entire file in
 // memory.
+//
+// It is implemented as a ring-buffer: the current offset in buf to read
+// from is in readOffset, and the currentOffset to copy values read from
+// the reader to is in writeOffset.  Both of these are taken mod bufSize
+// when used to compute offsets into buf.
 type SomewhatSeekableReader struct {
 	R                       io.Reader
 	buf                     []byte
@@ -179,26 +184,37 @@ func MakeSomewhatSeekableReader(r io.Reader, size int) *SomewhatSeekableReader {
 }
 
 func (ssr *SomewhatSeekableReader) Read(b []byte) (int, error) {
-	n := 0
+	// If the caller has called Seek() to move backwards from the
+	// current read point of the underlying reader R, we start by
+	// copying values from our local buffer into the output buffer.
+	nCopied := 0
 	if ssr.readOffset < ssr.writeOffset {
-		for n := 0; ssr.readOffset < ssr.writeOffset && n < len(b); n++ {
-			b[n] = ssr.buf[ssr.readOffset%int64(ssr.bufSize)]
+		for ; ssr.readOffset < ssr.writeOffset && nCopied < len(b); nCopied++ {
+			b[nCopied] = ssr.buf[ssr.readOffset%int64(ssr.bufSize)]
 			ssr.readOffset++
 		}
-		if n == len(b) {
-			return n, nil
+		if nCopied == len(b) {
+			return nCopied, nil
 		}
 	}
 
-	nr, err := ssr.R.Read(b[n:])
+	// Once we're through the values we have locally buffered, we read
+	// from the underlying reader. Note that we read into b[] starting
+	// at the point where we stopped copying local values.
+	nRead, err := ssr.R.Read(b[nCopied:])
 
-	for i := 0; i < nr; i++ {
-		ssr.buf[ssr.writeOffset%int64(ssr.bufSize)] = b[n+i]
+	// Now update our local buffer of read values.  Note that this loop
+	// is a bit wasteful in the case where nRead > ssr.bufSize; some of
+	// the values it writes will be clobbered by a later iteration of
+	// the loop.  (It's not clear that this is a big enough issue to
+	// really worry about.)
+	for i := 0; i < nRead; i++ {
+		ssr.buf[ssr.writeOffset%int64(ssr.bufSize)] = b[nCopied+i]
 		ssr.readOffset++
 		ssr.writeOffset++
 	}
 
-	return n + nr, err
+	return nCopied + nRead, err
 }
 
 func (ssr *SomewhatSeekableReader) SeekTo(offset int64) error {
@@ -1329,7 +1345,14 @@ func uploadFileContentsResumable(driveFile *drive.File, contentsReader io.Reader
 			body = &RateLimitedReader{R: body}
 		}
 
-		req, _ := http.NewRequest("PUT", sessionURI, body)
+		all, err := ioutil.ReadAll(body)
+		if int64(len(all)) != end-currentOffset {
+			log.Fatalf("reader gave us %d bytes, expected %d, bye", len(all),
+				end-currentOffset)
+		}
+		req, _ := http.NewRequest("PUT", sessionURI, bytes.NewReader(all))
+
+		//		req, _ := http.NewRequest("PUT", sessionURI, body)
 		req.ContentLength = int64(end - currentOffset)
 		req.Header.Set("Content-Type", contentType)
 		req.Header.Set("Content-Range",
@@ -1425,9 +1448,9 @@ func prepareUploadPUT(driveFile *drive.File, contentsReader io.Reader,
 // Upload the file contents given by the io.Reader to the given *drive.File.
 func uploadFileContents(driveFile *drive.File, contentsReader io.Reader,
 	length int64, currentTry int) error {
-	// FIXME: for testing, always run the resumable upload path.
-	// Later, only run it for large enough files...
-	if true || length > 1024*1024 {
+	// Only run the resumable upload path for large files (it
+	// introduces some overhead that isn't worth it for smaller files.)
+	if length > 1024*1024 {
 		return uploadFileContentsResumable(driveFile, contentsReader, length)
 	}
 
