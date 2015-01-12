@@ -24,8 +24,6 @@ import (
 	"code.google.com/p/gcfg"
 	"code.google.com/p/go.crypto/pbkdf2"
 	"code.google.com/p/goauth2/oauth"
-	"code.google.com/p/google-api-go-client/drive/v2"
-	"code.google.com/p/google-api-go-client/googleapi"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/md5"
@@ -35,6 +33,8 @@ import (
 	"flag"
 	"fmt"
 	"github.com/cheggaaa/pb"
+	"google.golang.org/api/drive/v2"
+	"google.golang.org/api/googleapi"
 	"io"
 	"io/ioutil"
 	"log"
@@ -55,6 +55,7 @@ import (
 )
 
 const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
+const encryptionSuffix = ".aes256"
 
 ///////////////////////////////////////////////////////////////////////////
 // Global Variables
@@ -128,6 +129,15 @@ type RetryHTTPTransmitError struct {
 
 func (r RetryHTTPTransmitError) Error() string {
 	return fmt.Sprintf("http %d error (%s); retry", r.StatusCode, r.StatusBody)
+}
+
+type CommandSyntaxError struct {
+	Cmd string
+	Msg string
+}
+
+func (c CommandSyntaxError) Error() string {
+	return fmt.Sprintf("%s syntax error: %s", c.Cmd, c.Msg)
 }
 
 // FileCloser is kind of a hack: it implements the io.ReadCloser
@@ -291,6 +301,17 @@ func (lr RateLimitedReader) Read(dst []byte) (int, error) {
 		bandwidthBudgetMutex.Unlock()
 	}
 
+	return read, err
+}
+
+type ByteCountingReader struct {
+	R         io.Reader
+	bytesRead int
+}
+
+func (bcr *ByteCountingReader) Read(dst []byte) (int, error) {
+	read, err := bcr.R.Read(dst)
+	bcr.bytesRead += read
 	return read, err
 }
 
@@ -573,9 +594,8 @@ func getRandomBytes(n int) []byte {
 func generateKey() {
 	passphrase := os.Getenv(passphraseEnvironmentVariable)
 	if passphrase == "" {
-		fmt.Fprintf(os.Stderr, "skicka: SKICKA_PASSPHRASE "+
-			"environment variable not set.\n")
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: SKICKA_PASSPHRASE " +
+			"environment variable not set.\n"))
 	}
 
 	// Derive a 64-byte hash from the passphrase using PBKDF2 with 65536
@@ -836,14 +856,39 @@ func createDriveFolder(title string, mode os.FileMode, modTime time.Time,
 	return f, nil
 }
 
+type fileNotFoundError struct {
+	path        string
+	invokingCmd string
+}
+
+func (err fileNotFoundError) Error() string {
+	msg := ""
+	if err.invokingCmd != "" {
+		msg += fmt.Sprintf("%s: ", err.invokingCmd)
+	}
+	return fmt.Sprintf("%s%s: No such file or directory", msg, err.path)
+}
+
+type removeDirectoryError struct {
+	path        string
+	invokingCmd string
+}
+
+func (err removeDirectoryError) Error() string {
+	msg := ""
+	if err.invokingCmd != "" {
+		msg += fmt.Sprintf("%s: ", err.invokingCmd)
+	}
+	return fmt.Sprintf("%s%s: is a directory", msg, err.path)
+}
+
 // Returns the *drive.File corresponding to a given path starting from the
 // root of the Google Drive filesystem.  (Note that *drive.File is used to
 // represent both files and folders in Google Drive.)
 func getDriveFile(path string) (*drive.File, error) {
 	parent, err := getFileById("root")
 	if err != nil {
-		log.Fatalf("unable to get Drive root directory: %v", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("unable to get Drive root directory: %v", err)
 	}
 
 	dirs := strings.Split(path, "/")
@@ -860,7 +905,9 @@ func getDriveFile(path string) (*drive.File, error) {
 		files := runDriveQuery(query)
 
 		if len(files) == 0 {
-			return nil, fmt.Errorf("%s: not found", path)
+			return nil, fileNotFoundError{
+				path: path,
+			}
 		} else if len(files) > 1 {
 			return nil, fmt.Errorf("%s: multiple files found", path)
 		} else {
@@ -906,7 +953,7 @@ func getFolderContents(path string, parentFolder *drive.File, recursive bool,
 // 'includeBase' indicates whether the *drive.File for the given path should
 // be included in the result, and 'mustExist' indicates whether an error
 // should be returned if the given path doesn't exist on Drive.
-func getFilesAtDrivePath(path string, recursive, includeBase,
+func getFilesAtRemotePath(path string, recursive, includeBase,
 	mustExist bool) map[string]*drive.File {
 	existingFiles := make(map[string]*drive.File)
 	file, err := getDriveFile(path)
@@ -914,15 +961,13 @@ func getFilesAtDrivePath(path string, recursive, includeBase,
 		if !mustExist {
 			return existingFiles
 		}
-		fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %v\n", err))
 	}
 
 	if isFolder(file) {
 		err := getFolderContents(path, file, recursive, existingFiles)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
-			os.Exit(1)
+			printErrorAndExit(fmt.Errorf("skicka: %v\n", err))
 		}
 		if includeBase {
 			existingFiles[path] = file
@@ -1289,7 +1334,11 @@ func detectContentType(contentsReader io.Reader) (io.Reader, string, error) {
 	contentsHeader := make([]byte, 512)
 	headerLength, err := contentsReader.Read(contentsHeader)
 	if err != nil {
-		return nil, "", err
+		if err.Error() == "EOF" {
+			// Empty file; this is fine, and we're done.
+			return nil, nil
+		}
+		return nil, err
 	}
 	contentType := http.DetectContentType(contentsHeader)
 
@@ -1345,6 +1394,11 @@ func uploadFileContents(driveFile *drive.File, contentsReader io.Reader,
 	if err != nil {
 		return err
 	}
+	if req == nil {
+		// Empty file--we're done.
+		atomic.AddInt64(&stats.DriveFilesUpdated, 1)
+		return nil
+	}
 
 	// And send it off...
 	resp, err := oAuthTransport.RoundTrip(req)
@@ -1390,7 +1444,12 @@ func getDriveFileContentsReader(driveFile *drive.File) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	url := driveFile.DownloadUrl
+
+	if url == "" {
+		url = driveFile.ExportLinks[driveFile.MimeType]
+	}
 
 	for ntries := 0; ; ntries++ {
 		request, err := http.NewRequest("GET", url, nil)
@@ -1489,10 +1548,10 @@ func isFolder(f *drive.File) bool {
 // Uploading files and directory hierarchies to Google Drive
 
 // Representation of a local file that may need to be synced up to Drive.
-type LocalFile struct {
-	LocalPath string
-	DrivePath string
-	FileInfo  os.FileInfo
+type LocalToRemoteFileMapping struct {
+	LocalPath     string
+	RemotePath    string
+	LocalFileInfo os.FileInfo
 }
 
 // Perform fairly inexpensive comparisons of the file size and last modification
@@ -1591,9 +1650,11 @@ func getFileContentsReaderForUpload(path string, encrypt bool,
 // but has different contents, the contents are updated.  The Unix
 // permissions and file modification time on Drive are also updated
 // appropriately.
-func syncFileUp(file LocalFile, encrypt bool,
-	existingDriveFiles map[string]*drive.File) error {
-	debug.Printf("syncFileUp: %#v", file.FileInfo)
+// Besides being sent up to Google Drive, the file is tee'd (via io.Tee)
+// into an optional writer variable.  This variable can safely be nil.
+func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
+	existingDriveFiles map[string]*drive.File, pb *pb.ProgressBar) error {
+	debug.Printf("syncFileUp: %#v", fileMapping.LocalFileInfo)
 
 	// We need to create the file or folder on Google Drive.
 	var err error
@@ -1601,7 +1662,7 @@ func syncFileUp(file LocalFile, encrypt bool,
 	// Get the *drive.File for the folder to create the new file in.
 	// This folder should definitely exist at this point, since we
 	// create all folders needed before starting to upload files.
-	dirPath := filepath.Dir(file.DrivePath)
+	dirPath := filepath.Dir(fileMapping.RemotePath)
 	if dirPath == "." {
 		dirPath = "/"
 	}
@@ -1613,19 +1674,19 @@ func syncFileUp(file LocalFile, encrypt bool,
 			// parent folder definitely should have been
 			// created by now, and we can't proceed without
 			// it...
-			fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
-			os.Exit(1)
+			printErrorAndExit(fmt.Errorf("skicka: %v\n", err))
 		}
 	}
 
-	baseName := filepath.Base(file.DrivePath)
+	baseName := filepath.Base(fileMapping.RemotePath)
 	var driveFile *drive.File
 
-	if file.FileInfo.IsDir() {
+	if fileMapping.LocalFileInfo.IsDir() {
 		driveFile, _ = createDriveFolder(baseName,
-			file.FileInfo.Mode(), file.FileInfo.ModTime(), parentFile)
-		atomic.AddInt64(&stats.UploadBytes, file.FileInfo.Size())
-		verbose.Printf("Created Google Drive folder %s", file.DrivePath)
+			fileMapping.LocalFileInfo.Mode(), fileMapping.LocalFileInfo.ModTime(), parentFile)
+		atomic.AddInt64(&stats.UploadBytes, fileMapping.LocalFileInfo.Size())
+		pb.Add64(fileMapping.LocalFileInfo.Size())
+		verbose.Printf("Created Google Drive folder %s", fileMapping.RemotePath)
 
 		// We actually only update the map when we create new folders;
 		// we don't update it for new files.  There are two reasons
@@ -1639,13 +1700,16 @@ func syncFileUp(file LocalFile, encrypt bool,
 		// another session, this map may become stale; we don't
 		// explicitly look out for this and will presumably error out
 		// in interesting ways if it does happen.
-		existingDriveFiles[file.DrivePath] = driveFile
+		existingDriveFiles[fileMapping.RemotePath] = driveFile
 	} else {
-		driveFile, err = createDriveFile(baseName, file.FileInfo.Mode(),
-			file.FileInfo.ModTime(), encrypt, parentFile)
-		if err != nil {
-			return err
+		if driveFile, ok = existingDriveFiles[fileMapping.RemotePath]; !ok {
+			driveFile, err = createDriveFile(baseName, fileMapping.LocalFileInfo.Mode(),
+				fileMapping.LocalFileInfo.ModTime(), encrypt, parentFile)
+			if err != nil {
+				return err
+			}
 		}
+
 		var iv []byte
 		if encrypt {
 			iv, err = getInitializationVector(driveFile)
@@ -1655,16 +1719,27 @@ func syncFileUp(file LocalFile, encrypt bool,
 		}
 
 		for ntries := 0; ntries < 5; ntries++ {
+			var reader io.Reader
+			var countingReader *ByteCountingReader
+
 			contentsReader, length, err :=
-				getFileContentsReaderForUpload(file.LocalPath, encrypt, iv)
+				getFileContentsReaderForUpload(fileMapping.LocalPath, encrypt, iv)
 			if contentsReader != nil {
 				defer contentsReader.Close()
 			}
 			if err != nil {
 				return err
 			}
+			reader = contentsReader
 
-			err = uploadFileContents(driveFile, contentsReader, length, ntries)
+			if pb != nil {
+				countingReader = &ByteCountingReader{
+					R: reader,
+				}
+				reader = io.TeeReader(countingReader, pb)
+			}
+
+			err = uploadFileContents(driveFile, reader, length, ntries)
 			if err == nil {
 				// Success!
 				break
@@ -1672,22 +1747,33 @@ func syncFileUp(file LocalFile, encrypt bool,
 
 			if re, ok := err.(RetryHTTPTransmitError); ok {
 				debug.Printf("%s: got retry http error--retrying: %s",
-					file.LocalPath, re.Error())
+					fileMapping.LocalPath, re.Error())
+				if pb != nil {
+					// The "progress" made so far on this file should be rolled back
+					pb.Add64(int64(0 - countingReader.bytesRead))
+				}
 			} else {
+				debug.Printf("%s: giving up due to error: %v",
+					fileMapping.LocalPath, err)
+				// This file won't be uploaded, so subtract the expected progress
+				// from the total expected bytes
+				if pb != nil {
+					pb.Add64(int64(0 - countingReader.bytesRead))
+					pb.Total -= length
+				}
 				return err
 			}
 		}
 	}
 
-	verbose.Printf("Updated local %s -> Google Drive %s", file.LocalPath,
-		file.DrivePath)
-	return updateModificationTime(driveFile, file.FileInfo.ModTime())
+	verbose.Printf("Updated local %s -> Google Drive %s", fileMapping.LocalPath,
+		fileMapping.RemotePath)
+	return updateModificationTime(driveFile, fileMapping.LocalFileInfo.ModTime())
 }
 
 func checkFatalError(err error, message string) {
 	if err != nil {
-		fmt.Fprintf(os.Stderr, message, err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf(message, err))
 	}
 }
 
@@ -1710,30 +1796,30 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	// RateLimitedReader Read() function.
 	launchBandwidthTask(config.Upload.Bytes_per_second_limit)
 
-	localFiles, err := compileUploadFileTree(localPath, driveRoot, encrypt)
+	fileMappings, err := compileUploadFileTree(localPath, driveRoot, encrypt)
 	checkFatalError(err, "skicka: error getting local filetree: %v\n")
 	timeDelta("Walk local directories")
-	toUpload, err := filterFilesToUpload(localFiles, existingFiles, encrypt, ignoreTimes)
+	fileMappings, err = filterFilesToUpload(fileMappings, existingFiles, encrypt, ignoreTimes)
 	checkFatalError(err, "skicka: error determining files to sync: %v\n")
 
-	if len(toUpload) == 0 {
+	if len(fileMappings) == 0 {
 		fmt.Fprintln(os.Stderr, "There are no new files that need to be uploaded.")
 		return nil
 	}
 
 	nBytesToUpload := int64(0)
-	for _, info := range toUpload {
-		nBytesToUpload += info.FileInfo.Size()
+	for _, info := range fileMappings {
+		nBytesToUpload += info.LocalFileInfo.Size()
 	}
 
 	// Given the list of files to sync, first find all of the directories and
 	// then either get or create a Drive folder for each one.
-	directoryMap := make(map[string]LocalFile)
+	directoryMappingMap := make(map[string]LocalToRemoteFileMapping)
 	var directoryNames []string
-	for _, localfile := range toUpload {
-		if localfile.FileInfo.IsDir() {
-			directoryNames = append(directoryNames, localfile.DrivePath)
-			directoryMap[localfile.DrivePath] = localfile
+	for _, localfile := range fileMappings {
+		if localfile.LocalFileInfo.IsDir() {
+			directoryNames = append(directoryNames, localfile.RemotePath)
+			directoryMappingMap[localfile.RemotePath] = localfile
 		}
 	}
 
@@ -1750,15 +1836,13 @@ func syncHierarchyUp(localPath string, driveRoot string,
 
 	// And finally sync the directories, which serves to create any missing ones.
 	for _, dirName := range directoryNames {
-		file := directoryMap[dirName]
-		err = syncFileUp(file, encrypt, existingFiles)
+		file := directoryMappingMap[dirName]
+		err = syncFileUp(file, encrypt, existingFiles, progressBar)
 		if err != nil {
 			nUploadErrors++
-			fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", file.LocalPath, err)
-			os.Exit(1)
+			printErrorAndExit(fmt.Errorf("skicka: %s: %v\n", file.LocalPath, err))
 		}
 		updateActiveMemory()
-		progressBar.Add64(file.FileInfo.Size())
 	}
 	timeDelta("Create Google Drive directories")
 
@@ -1784,16 +1868,14 @@ func syncHierarchyUp(localPath string, driveRoot string,
 				break
 			}
 
-			localFile := toUpload[index]
+			localFile := fileMappings[index]
 
-			err = syncFileUp(localFile, encrypt,
-				existingFiles)
+			err = syncFileUp(localFile, encrypt, existingFiles, progressBar)
 			if err != nil {
 				atomic.AddInt32(&nUploadErrors, 1)
 				fmt.Fprintf(os.Stderr, "skicka: %s: %v\n",
 					localFile.LocalPath, err)
 			}
-			progressBar.Add64(localFile.FileInfo.Size())
 			updateActiveMemory()
 		}
 	}
@@ -1804,8 +1886,8 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	}
 	// Communicate the indices of the entries in the localFiles[] array
 	// to be processed by the workers.
-	for index, file := range toUpload {
-		if !file.FileInfo.IsDir() {
+	for index, file := range fileMappings {
+		if !file.LocalFileInfo.IsDir() {
 			indexChan <- index
 		}
 	}
@@ -1827,38 +1909,38 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	return fmt.Errorf("%d files not uploaded due to errors", nUploadErrors)
 }
 
-func filterFilesToUpload(localFiles []LocalFile, existingDriveFiles map[string]*drive.File,
-	encrypt, ignoreTimes bool) ([]LocalFile, error) {
+func filterFilesToUpload(fileMappings []LocalToRemoteFileMapping, existingDriveFiles map[string]*drive.File,
+	encrypt, ignoreTimes bool) ([]LocalToRemoteFileMapping, error) {
 
 	// files to be uploaded are kept in this slice
-	var toUpload []LocalFile
+	var toUpload []LocalToRemoteFileMapping
 
-	for _, file := range localFiles {
-		driveFile, exists := existingDriveFiles[file.DrivePath]
+	for _, file := range fileMappings {
+		driveFile, exists := existingDriveFiles[file.RemotePath]
 		if !exists {
 			toUpload = append(toUpload, file)
 		} else {
 			// The file already exists on Drive; just make sure it has all
 			// of the properties that we expect.
-			if err := createMissingProperties(driveFile, file.FileInfo.Mode(), encrypt); err != nil {
+			if err := createMissingProperties(driveFile, file.LocalFileInfo.Mode(), encrypt); err != nil {
 
 				return nil, err
 			}
 
 			// Go ahead and update the file's permissions if they've changed
-			if err := updatePermissions(driveFile, file.FileInfo.Mode()); err != nil {
+			if err := updatePermissions(driveFile, file.LocalFileInfo.Mode()); err != nil {
 				return nil, err
 			}
 
-			if file.FileInfo.IsDir() {
+			if file.LocalFileInfo.IsDir() {
 				// If it's a directory, once it's created and the permissions and times
 				// are updated (if needed), we're all done.
 				t, err := getModificationTime(driveFile)
 				if err != nil {
 					return nil, err
 				}
-				if !t.Equal(file.FileInfo.ModTime()) {
-					if err := updateModificationTime(driveFile, file.FileInfo.ModTime()); err != nil {
+				if !t.Equal(file.LocalFileInfo.ModTime()) {
+					if err := updateModificationTime(driveFile, file.LocalFileInfo.ModTime()); err != nil {
 						return nil, err
 					}
 				}
@@ -1866,7 +1948,7 @@ func filterFilesToUpload(localFiles []LocalFile, existingDriveFiles map[string]*
 			}
 
 			// Do superficial checking on the files
-			metadataMatches, err := fileMetadataMatches(file.FileInfo, encrypt, driveFile)
+			metadataMatches, err := fileMetadataMatches(file.LocalFileInfo, encrypt, driveFile)
 
 			if err != nil {
 				return nil, err
@@ -1895,7 +1977,7 @@ func filterFilesToUpload(localFiles []LocalFile, existingDriveFiles map[string]*
 				// modified time on Drive so that we don't keep checking this
 				// file.
 				debug.Printf("contents match, timestamps do not")
-				if err := updateModificationTime(driveFile, file.FileInfo.ModTime()); err != nil {
+				if err := updateModificationTime(driveFile, file.LocalFileInfo.ModTime()); err != nil {
 					return nil, err
 				}
 			} else if metadataMatches == true {
@@ -1920,10 +2002,10 @@ func filterFilesToUpload(localFiles []LocalFile, existingDriveFiles map[string]*
 	return toUpload, nil
 }
 
-func compileUploadFileTree(localPath, driveRoot string, encrypt bool) ([]LocalFile, error) {
+func compileUploadFileTree(localPath, driveRoot string, encrypt bool) ([]LocalToRemoteFileMapping, error) {
 	// Walk the local directory hierarchy starting at 'localPath' and build
 	// an array of files that may need to be synchronized.
-	var localFiles []LocalFile
+	var fileMappings []LocalToRemoteFileMapping
 
 	walkFuncCallback := func(path string, info os.FileInfo, patherr error) error {
 		path = filepath.Clean(path)
@@ -1959,32 +2041,32 @@ func compileUploadFileTree(localPath, driveRoot string, encrypt bool) ([]LocalFi
 		}
 		drivePath := filepath.Clean(driveRoot + "/" + relPath)
 		if info.IsDir() == false && encrypt == true {
-			drivePath += ".aes256"
+			drivePath += encryptionSuffix
 		}
-		localFiles = append(localFiles, LocalFile{path, drivePath, info})
+		fileMappings = append(fileMappings, LocalToRemoteFileMapping{path, drivePath, info})
 		return nil
 	}
 
 	err := filepath.Walk(localPath, walkFuncCallback)
-	return localFiles, err
+	return fileMappings, err
 }
 
 ///////////////////////////////////////////////////////////////////////////
 // Downloading files and directory hierarchies from Google Drive
 
 // If a file is encrypted, it should both have the initialization vector used
-// to encrypt it stored as a Drive file property and have ".aes256" at the end
+// to encrypt it stored as a Drive file property and have encryptionSuffix at the end
 // of its filename. This function checks both of these and returns an error if
 // these indicators are inconsistent; otherwise, it returns true/false
 // accordingly.
 func isEncrypted(file *drive.File) (bool, error) {
 	if _, err := getProperty(file, "IV"); err == nil {
-		if strings.HasSuffix(file.Title, ".aes256") {
+		if strings.HasSuffix(file.Title, encryptionSuffix) {
 			return true, nil
 		}
 		return false, fmt.Errorf("has IV property but doesn't " +
 			"end with .aes256 suffix")
-	} else if strings.HasSuffix(file.Title, ".aes256") {
+	} else if strings.HasSuffix(file.Title, encryptionSuffix) {
 		// This could actually happen with an interrupted upload
 		// with 403 errors and the case where a file is created
 		// even though a 403 happened, if we don't get to delete
@@ -2088,7 +2170,6 @@ func syncFolderDown(localPath string, driveFilename string, driveFile *drive.Fil
 
 // Sync the given file from Google Drive to the local filesystem.
 func downloadDriveFile(writer io.Writer, driveFile *drive.File) error {
-
 	driveContentsReader, err := getDriveFileContentsReader(driveFile)
 	if driveContentsReader != nil {
 		defer driveContentsReader.Close()
@@ -2154,9 +2235,8 @@ func syncHierarchyDown(drivePath string, localPath string,
 	// Both drivePath and localPath must be directories, or both must be files.
 	if stat, err := os.Stat(localPath); err == nil && len(filesOnDrive) == 1 &&
 		stat.IsDir() != isFolder(filesOnDrive[driveFilenames[0]]) {
-		fmt.Fprintf(os.Stderr, "skicka: %s: remote and local must both be directory or both be files.\n",
-			localPath)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %s: remote and local must both be directory or both be files.\n",
+			localPath))
 	}
 
 	nDownloadErrors := int32(0)
@@ -2179,9 +2259,8 @@ func syncHierarchyDown(drivePath string, localPath string,
 		} else {
 			needsDownload, err := fileNeedsDownload(filePath, driveFilename, driveFile, ignoreTimes)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "skicka: error determining if file %s should "+
-					"be downloaded: %v\n", driveFilename, err)
-				os.Exit(1)
+				printErrorAndExit(fmt.Errorf("skicka: error determining if file %s should "+
+					"be downloaded: %v\n", driveFilename, err))
 			}
 			if needsDownload {
 				nBytesToDownload += driveFile.FileSize
@@ -2226,24 +2305,23 @@ func syncHierarchyDown(drivePath string, localPath string,
 
 			writeCloser, err := createFileWriteCloser(filePath, driveFile)
 			if err != nil {
-				atomic.AddInt32(&nDownloadErrors, 1)
-				fmt.Fprintf(os.Stderr, "skicka: error creating file. Error: %s\n", err)
+				addErrorAndPrintMessage(&nDownloadErrors, "skicka: error creating file write closer.", err)
 				continue
 			}
 			defer writeCloser.Close()
 
 			multiwriter := io.MultiWriter(writeCloser, progressBar)
-			err = downloadDriveFile(multiwriter, driveFile)
+
+			if err := downloadDriveFile(multiwriter, driveFile); err != nil {
+				addErrorAndPrintMessage(&nDownloadErrors, "skicka: error downloading drive file.", err)
+				continue
+			}
 			if err := updateLocalFileProperties(filePath, driveFile); err != nil {
-				fmt.Fprintf(os.Stderr, "skicka: error updating the local file: %s\n", err)
+				addErrorAndPrintMessage(&nDownloadErrors, "skicka: error updating the local file.", err)
+				continue
 			}
 			debug.Printf("Downloaded %d bytes for %s", driveFile.FileSize, filePath)
 			verbose.Printf("Wrote %d bytes to %s", driveFile.FileSize, filePath)
-
-			if err != nil {
-				atomic.AddInt32(&nDownloadErrors, 1)
-				fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
-			}
 			updateActiveMemory()
 		}
 	}
@@ -2284,13 +2362,28 @@ func syncHierarchyDown(drivePath string, localPath string,
 	return fmt.Errorf("%d files not downloaded due to errors", nDownloadErrors)
 }
 
+func addErrorAndPrintMessage(totalErrors *int32, message string, err error) {
+	fmt.Fprintf(os.Stderr, message+" Error: %s\n", err)
+	atomic.AddInt32(totalErrors, 1)
+}
+
+func printErrorAndExit(err error) {
+	fmt.Fprintln(os.Stderr, err)
+	os.Exit(1)
+}
+
+func printUsageAndExit() {
+	usage()
+	os.Exit(1)
+}
+
 func createFileWriteCloser(localPath string, driveFile *drive.File) (io.WriteCloser, error) {
 	encrypted, err := isEncrypted(driveFile)
 	if err != nil {
 		return nil, err
 	}
 	if encrypted {
-		localPath = strings.TrimSuffix(localPath, ".aes256")
+		localPath = strings.TrimSuffix(localPath, encryptionSuffix)
 	}
 
 	// Create or overwrite the local file.
@@ -2367,15 +2460,13 @@ func createConfigFile(filename string) {
 	if _, err := os.Stat(filename); os.IsNotExist(err) {
 		err := ioutil.WriteFile(filename, []byte(contents), 0600)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "skicka: unable to create "+
-				"configuration file %s: %v\n", filename, err)
-			os.Exit(1)
+			printErrorAndExit(fmt.Errorf("skicka: unable to create "+
+				"configuration file %s: %v\n", filename, err))
 		}
 		fmt.Printf("skicka: created configuration file %s.\n", filename)
 	} else {
-		fmt.Fprintf(os.Stderr, "skicka: %s: file already exists; "+
-			"leaving it alone.\n", filename)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %s: file already exists; "+
+			"leaving it alone.\n", filename))
 	}
 }
 
@@ -2428,27 +2519,23 @@ func checkConfigValidity() {
 func readConfigFile(filename string) {
 	filename, err := tildeExpand(filename)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: %s: error expanding configuration "+
-			"file path: %v\n", filename, err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %s: error expanding configuration "+
+			"file path: %v\n", filename, err))
 	}
 
 	if info, err := os.Stat(filename); err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %v\n", err))
 	} else if goperms := info.Mode() & ((1 << 6) - 1); goperms != 0 {
-		fmt.Fprintf(os.Stderr, "skicka: %s: permissions of configuration file "+
+		printErrorAndExit(fmt.Errorf("skicka: %s: permissions of configuration file "+
 			"allow group/other access. Your secrets are at risk.\n",
-			filename)
-		os.Exit(1)
+			filename))
 	}
 
 	err = gcfg.ReadFileInto(&config, filename)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", filename, err)
-		fmt.Fprintf(os.Stderr, "skicka: you may want to run \"skicka "+
-			"init\" to create an initial configuration file.\n")
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: you may want to run \"skicka " +
+			"init\" to create an initial configuration file.\n"))
 	}
 	checkConfigValidity()
 }
@@ -2491,6 +2578,14 @@ Commands and their options are:
              where intermediate directories in the path are created if -p is
              specified.
 
+  rm	     Remove a file or directory at the given Google Drive path.
+             Arguments: [-r, -s] <drive path>,
+             where files and directories are recursively removed if -r is specified
+             and the google drive trash is skipped if -s is specified. The default 
+             behavior is to fail if the drive path specified is a directory and -r is
+             not specified, and to send files to the trash instead of permanently
+             deleting them.
+
   upload     Uploads all files in the local directory and its children to the
              given Google Drive path. Skips files that have already been
              uploaded.
@@ -2512,17 +2607,17 @@ General options valid for all commands:
 `)
 }
 
-func du() {
-	if len(flag.Args()) != 2 {
-		usage()
-		os.Exit(1)
+func du(args []string) {
+
+	if len(args) != 1 {
+		printUsageAndExit()
 	}
-	drivePath := filepath.Clean(flag.Arg(1))
+	drivePath := filepath.Clean(args[0])
 
 	recursive := true
 	includeBase := false
 	mustExist := true
-	existingFiles := getFilesAtDrivePath(drivePath, recursive, includeBase,
+	existingFiles := getFilesAtRemotePath(drivePath, recursive, includeBase,
 		mustExist)
 
 	// Accumulate the size in bytes of each folder in the hierarchy
@@ -2550,22 +2645,19 @@ func du() {
 	fmt.Printf("%s  %s\n", fmtbytes(totalSize, true), drivePath)
 }
 
-func cat() {
-	if len(flag.Args()) != 2 {
-		usage()
-		os.Exit(1)
+func cat(args []string) {
+	if len(args) != 1 {
+		printUsageAndExit()
 	}
-	filename := filepath.Clean(flag.Arg(1))
+	filename := filepath.Clean(args[0])
 
 	file, err := getDriveFile(filename)
 	timeDelta("Get file descriptors from Google Drive")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
-		os.Exit(1)
+		printErrorAndExit(err)
 	}
 	if isFolder(file) {
-		fmt.Fprintf(os.Stderr, "skicka: %s: is a directory.\n", filename)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %s: is a directory.\n", filename))
 	}
 
 	contentsReader, err := getDriveFileContentsReader(file)
@@ -2573,34 +2665,31 @@ func cat() {
 		defer contentsReader.Close()
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", filename, err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %s: %v\n", filename, err))
 	}
 
 	_, err = io.Copy(os.Stdout, contentsReader)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", filename, err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %s: %v\n", filename, err))
 	}
 }
 
-func mkdir() {
+func mkdir(args []string) {
 	makeIntermediate := false
-	i := 1
-	for ; i+1 < len(flag.Args()); i++ {
-		if flag.Arg(i) == "-p" {
+
+	i := 0
+	for ; i+1 < len(args); i++ {
+		if args[i] == "-p" {
 			makeIntermediate = true
 		} else {
-			usage()
-			os.Exit(1)
+			printUsageAndExit()
 		}
 	}
-	drivePath := filepath.Clean(flag.Arg(i))
+	drivePath := filepath.Clean(args[i])
 
 	parent, err := getFileById("root")
 	if err != nil {
-		log.Fatalf("unable to get Drive root directory: %v", err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("unable to get Drive root directory: %v", err))
 	}
 
 	dirs := strings.Split(drivePath, "/")
@@ -2621,9 +2710,8 @@ func mkdir() {
 		files := runDriveQuery(query)
 
 		if len(files) > 1 {
-			fmt.Fprintf(os.Stderr, "skicka: %s: multiple files with "+
-				"this name", pathSoFar)
-			os.Exit(1)
+			printErrorAndExit(fmt.Errorf("skicka: %s: multiple files with "+
+				"this name", pathSoFar))
 		}
 
 		if len(files) == 0 {
@@ -2634,26 +2722,19 @@ func mkdir() {
 				parent, err = createDriveFolder(dir, 0755, time.Now(), parent)
 				debug.Printf("Creating folder %s", pathSoFar)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "skicka: %s: %v\n",
-						pathSoFar, err)
-					os.Exit(1)
+					printErrorAndExit(fmt.Errorf("skicka: %s: %v\n", pathSoFar, err))
 				}
 			} else {
-				fmt.Fprintf(os.Stderr, "skicka: %s: no such "+
-					"directory\n", pathSoFar)
-				os.Exit(1)
+				printErrorAndExit(fmt.Errorf("skicka: %s: no such "+
+					"directory\n", pathSoFar))
 			}
 		} else {
 			// Found it; if it's a folder this is good, unless it's
 			// the folder we were supposed to be creating.
 			if index+1 == nDirs && !makeIntermediate {
-				fmt.Fprintf(os.Stderr, "skicka: %s: already "+
-					"exists\n", pathSoFar)
-				os.Exit(1)
+				printErrorAndExit(fmt.Errorf("skicka: %s: already exists\n", pathSoFar))
 			} else if !isFolder(files[0]) {
-				fmt.Fprintf(os.Stderr, "skicka: %s: not a "+
-					"folder\n", pathSoFar)
-				os.Exit(1)
+				printErrorAndExit(fmt.Errorf("skicka: %s: not a folder\n", pathSoFar))
 			} else {
 				parent = files[0]
 			}
@@ -2685,26 +2766,170 @@ func getPermissionsAsString(driveFile *drive.File) (string, error) {
 	return str, nil
 }
 
-func ls() {
+var rmSyntaxError CommandSyntaxError = CommandSyntaxError{
+	Cmd: "rm",
+	Msg: "drive path cannot be empty.\n" +
+		"Usage: rm [-r, -s] drive path",
+}
+
+type driveQueryer interface {
+	getDriveFile() (*drive.File, error)
+	drivePath() string
+}
+
+type driveDeleter interface {
+	deleteDriveFile() error
+	trashDriveFile() (*drive.File, error)
+	isSkipTrash() bool
+}
+
+type RmCommand struct {
+	recursive     bool
+	skipTrash     bool
+	path          string
+	svc           *drive.Service
+	queryService  driveQueryer
+	deleteService driveDeleter
+	driveFile     *drive.File
+}
+
+func (rmCmd *RmCommand) getDriveFile() (*drive.File, error) {
+	driveFile, err := getDriveFile(rmCmd.path)
+	if err == nil {
+		rmCmd.driveFile = driveFile
+	}
+	return driveFile, err
+}
+
+func (rmCmd *RmCommand) deleteDriveFile() error {
+	debug.Printf("Deleting file %s (id %s)", rmCmd.path, rmCmd.driveFile.Id)
+	return rmCmd.svc.Files.Delete(rmCmd.driveFile.Id).Do()
+}
+
+func (rmCmd *RmCommand) trashDriveFile() (*drive.File, error) {
+	debug.Printf("Trashing file %s (id %s)", rmCmd.path, rmCmd.driveFile.Id)
+	return rmCmd.svc.Files.Trash(rmCmd.driveFile.Id).Do()
+}
+
+func (rmCmd *RmCommand) drivePath() string {
+	return rmCmd.path
+}
+
+func (rmCmd *RmCommand) isSkipTrash() bool {
+	return rmCmd.skipTrash
+}
+
+func rm(args []string) {
+	recursive, skipTrash := false, false
+	var drivePath string
+
+	for _, arg := range args {
+		switch {
+		case arg == "-r":
+			recursive = true
+		case arg == "-s":
+			skipTrash = true
+		case drivePath == "":
+			drivePath = arg
+		default:
+			printErrorAndExit(rmSyntaxError)
+		}
+	}
+
+	rmCmd := &RmCommand{
+		recursive: recursive,
+		skipTrash: skipTrash,
+		path:      drivePath,
+		svc:       drivesvc,
+	}
+
+	if err := checkRmPossible(rmCmd, recursive); err != nil {
+		if _, ok := err.(fileNotFoundError); ok {
+			// if there's an encrypted version on drive, let the user know and exit
+			oldPath := rmCmd.path
+			rmCmd.path += encryptionSuffix
+			if err := checkRmPossible(rmCmd, recursive); err == nil {
+				printErrorAndExit(fmt.Errorf("skicka rm: Found no file with path %s, but found encrypted version with path %s \n"+
+					"If you would like to rm the encrypted version, re-run the command adding the %s extension onto the path.",
+					oldPath, rmCmd.path, encryptionSuffix))
+			}
+		}
+		printErrorAndExit(err)
+	}
+
+	for nTries := 5; ; nTries += 1 {
+		err := deleteDriveFile(rmCmd)
+		if err == nil {
+			return
+		}
+		if err = tryToHandleDriveAPIError(err, nTries); err != nil {
+			printErrorAndExit(err)
+		}
+	}
+}
+
+func deleteDriveFile(deleter driveDeleter) error {
+	skipTrash := deleter.isSkipTrash()
+	if skipTrash {
+		// do delete
+		return deleter.deleteDriveFile()
+	} else {
+		// do trash
+		_, err := deleter.trashDriveFile()
+		return err
+	}
+}
+
+func checkRmPossible(queryer driveQueryer, recursive bool) error {
+	if queryer.drivePath() == "" {
+		return rmSyntaxError
+	}
+
+	invokingCmd := "skicka rm"
+
+	driveFile, err := queryer.getDriveFile()
+	if err != nil {
+		switch err.(type) {
+		case fileNotFoundError:
+			return fileNotFoundError{
+				path:        queryer.drivePath(),
+				invokingCmd: invokingCmd,
+			}
+		default:
+			return err
+		}
+	}
+
+	if !recursive && isFolder(driveFile) {
+		return removeDirectoryError{
+			path:        queryer.drivePath(),
+			invokingCmd: invokingCmd,
+		}
+	}
+
+	return nil
+}
+
+func ls(args []string) {
 	long := false
 	longlong := false
 	recursive := false
 	var drivePath string
-	i := 1
-	for ; i < len(flag.Args()); i++ {
-		if flag.Arg(i) == "-l" {
+	for _, value := range args {
+		switch {
+		case value == "-l":
 			long = true
-		} else if flag.Arg(i) == "-ll" {
+		case value == "-ll":
 			longlong = true
-		} else if flag.Arg(i) == "-r" {
+		case value == "-r":
 			recursive = true
-		} else if drivePath == "" {
-			drivePath = flag.Arg(i)
-		} else {
-			usage()
-			os.Exit(1)
+		case drivePath == "":
+			drivePath = value
+		default:
+			printUsageAndExit()
 		}
 	}
+
 	if drivePath == "" {
 		drivePath = "/"
 	}
@@ -2712,7 +2937,7 @@ func ls() {
 
 	includeBase := false
 	mustExist := true
-	existingFiles := getFilesAtDrivePath(drivePath, recursive, includeBase,
+	existingFiles := getFilesAtRemotePath(drivePath, recursive, includeBase,
 		mustExist)
 
 	var filenames []string
@@ -2760,42 +2985,39 @@ func ls() {
 	}
 }
 
-func upload() {
+func upload(args []string) {
 	ignoreTimes := false
 	encrypt := false
 
-	if len(flag.Args()) < 3 {
-		usage()
-		os.Exit(1)
+	if len(args) < 2 {
+		printUsageAndExit()
 	}
 
-	i := 1
-	for ; i+2 < len(flag.Args()); i++ {
-		switch flag.Arg(i) {
+	i := 0
+	for ; i+2 < len(args); i++ {
+		switch args[i] {
 		case "-ignore-times":
 			ignoreTimes = true
 		case "-encrypt":
 			encrypt = true
 		default:
-			usage()
-			os.Exit(1)
+			printUsageAndExit()
 		}
 	}
 
-	localPath := filepath.Clean(flag.Arg(i))
-	drivePath := filepath.Clean(flag.Arg(i + 1))
+	localPath := filepath.Clean(args[i])
+	drivePath := filepath.Clean(args[i+1])
 
 	// Make sure localPath exists and is a directory.
 	if _, err := os.Stat(localPath); err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %v\n", err))
 	}
 
 	recursive := true
 	includeBase := true
 	mustExist := false
 	fmt.Fprintf(os.Stderr, "skicka: Getting list of files to upload... ")
-	existingFiles := getFilesAtDrivePath(drivePath, recursive, includeBase,
+	existingFiles := getFilesAtRemotePath(drivePath, recursive, includeBase,
 		mustExist)
 	fmt.Fprintf(os.Stderr, "Done. Starting upload.\n")
 
@@ -2813,32 +3035,30 @@ func upload() {
 	}
 }
 
-func download() {
-	if len(flag.Args()) < 3 {
-		usage()
-		os.Exit(1)
+func download(args []string) {
+	if len(args) < 2 {
+		printUsageAndExit()
 	}
 
 	ignoreTimes := false
-	i := 1
-	for ; i+2 < len(flag.Args()); i++ {
-		switch flag.Arg(i) {
+	i := 0
+	for ; i+2 < len(args); i++ {
+		switch args[i] {
 		case "-ignore-times":
 			ignoreTimes = true
 		default:
-			usage()
-			os.Exit(1)
+			printUsageAndExit()
 		}
 	}
 
-	drivePath := filepath.Clean(flag.Arg(i))
-	localPath := filepath.Clean(flag.Arg(i + 1))
+	drivePath := filepath.Clean(args[i])
+	localPath := filepath.Clean(args[i+1])
 
 	recursive := true
 	includeBase := true
 	mustExist := true
 	fmt.Fprintf(os.Stderr, "skicka: Getting list of files to download... ")
-	existingFiles := getFilesAtDrivePath(drivePath, recursive, includeBase,
+	existingFiles := getFilesAtRemotePath(drivePath, recursive, includeBase,
 		mustExist)
 	fmt.Fprintf(os.Stderr, "Done. Starting download.\n")
 
@@ -2866,8 +3086,7 @@ func main() {
 	flag.Parse()
 
 	if len(flag.Args()) == 0 {
-		usage()
-		os.Exit(1)
+		printUsageAndExit()
 	}
 
 	verbose = debugging(*vb || *dbg)
@@ -2876,9 +3095,8 @@ func main() {
 	var err error
 	*configFilename, err = tildeExpand(*configFilename)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: %s: error expanding "+
-			"config path: %v\n", *cachefile, err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %s: error expanding "+
+			"config path: %v\n", *cachefile, err))
 	}
 
 	cmd := flag.Arg(0)
@@ -2898,9 +3116,8 @@ func main() {
 
 	*cachefile, err = tildeExpand(*cachefile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: %s: error expanding "+
-			"cachefile path: %v\n", *cachefile, err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: %s: error expanding "+
+			"cachefile path: %v\n", *cachefile, err))
 	}
 
 	readConfigFile(*configFilename)
@@ -2908,26 +3125,28 @@ func main() {
 	err = createDriveClient(config.Google.ClientId, config.Google.ClientSecret,
 		*cachefile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: error creating Google Drive "+
-			"client: %v\n", err)
-		os.Exit(1)
+		printErrorAndExit(fmt.Errorf("skicka: error creating Google Drive "+
+			"client: %v\n", err))
 	}
+
+	args := flag.Args()[1:]
 
 	switch cmd {
 	case "du":
-		du()
+		du(args)
 	case "cat":
-		cat()
+		cat(args)
 	case "ls":
-		ls()
+		ls(args)
 	case "mkdir":
-		mkdir()
+		mkdir(args)
 	case "upload":
-		upload()
+		upload(args)
 	case "download":
-		download()
+		download(args)
+	case "rm":
+		rm(args)
 	default:
-		usage()
-		os.Exit(1)
+		printUsageAndExit()
 	}
 }
