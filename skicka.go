@@ -1763,7 +1763,7 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 			fileMapping.LocalFileInfo.Mode(), fileMapping.LocalFileInfo.ModTime(),
 			parentFile)
 		atomic.AddInt64(&stats.UploadBytes, fileMapping.LocalFileInfo.Size())
-		pb.Add64(fileMapping.LocalFileInfo.Size())
+		pb.Increment()
 		verbose.Printf("Created Google Drive folder %s", fileMapping.RemotePath)
 
 		// We actually only update the map when we create new folders;
@@ -1880,7 +1880,8 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	fileMappings, err := compileUploadFileTree(localPath, driveRoot, encrypt)
 	checkFatalError(err, "skicka: error getting local filetree: %v")
 	timeDelta("Walk local directories")
-	fileMappings, err = filterFilesToUpload(fileMappings, existingFiles, encrypt, ignoreTimes)
+	fileMappings, err = filterFilesToUpload(fileMappings, existingFiles, encrypt,
+		ignoreTimes)
 	checkFatalError(err, "skicka: error determining files to sync: %v")
 
 	if len(fileMappings) == 0 {
@@ -1890,7 +1891,9 @@ func syncHierarchyUp(localPath string, driveRoot string,
 
 	nBytesToUpload := int64(0)
 	for _, info := range fileMappings {
-		nBytesToUpload += info.LocalFileInfo.Size()
+		if !info.LocalFileInfo.IsDir() {
+			nBytesToUpload += info.LocalFileInfo.Size()
+		}
 	}
 
 	// Given the list of files to sync, first find all of the directories and
@@ -1908,24 +1911,32 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	// directory is available if we need to create its children.
 	sort.Strings(directoryNames)
 
-	progressBar := pb.New64(nBytesToUpload).SetUnits(pb.U_BYTES)
-	progressBar.ShowBar = true
-	progressBar.Output = os.Stderr
-	progressBar.Start()
-
 	nUploadErrors := int32(0)
+
+	dirProgressBar := pb.New(len(directoryNames))
+	dirProgressBar.ShowBar = true
+	dirProgressBar.Output = os.Stderr
+	dirProgressBar.Prefix("Directories: ")
+	dirProgressBar.Start()
 
 	// And finally sync the directories, which serves to create any missing ones.
 	for _, dirName := range directoryNames {
 		file := directoryMappingMap[dirName]
-		err = syncFileUp(file, encrypt, existingFiles, progressBar)
+		err = syncFileUp(file, encrypt, existingFiles, dirProgressBar)
 		if err != nil {
 			nUploadErrors++
 			printErrorAndExit(fmt.Errorf("skicka: %s: %v", file.LocalPath, err))
 		}
 		updateActiveMemory()
 	}
+	dirProgressBar.Finish()
 	timeDelta("Create Google Drive directories")
+
+	fileProgressBar := pb.New64(nBytesToUpload).SetUnits(pb.U_BYTES)
+	fileProgressBar.ShowBar = true
+	fileProgressBar.Output = os.Stderr
+	fileProgressBar.Prefix("Files: ")
+	fileProgressBar.Start()
 
 	// And finally actually update the files that look like they need it.
 	// Because round-trips to the Drive APIs take a while, we kick off multiple
@@ -1992,7 +2003,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 				continue
 			}
 
-			err = syncFileUp(fm, encrypt, existingFiles, progressBar)
+			err = syncFileUp(fm, encrypt, existingFiles, fileProgressBar)
 			if err != nil {
 				atomic.AddInt32(&nUploadErrors, 1)
 				fmt.Fprintf(os.Stderr, "skicka: %s: %v", fm.LocalPath, err)
@@ -2012,7 +2023,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	for i := 0; i < nWorkers; i++ {
 		<-doneChan
 	}
-	progressBar.Finish()
+	fileProgressBar.Finish()
 
 	timeDelta("Sync files")
 
@@ -3138,7 +3149,7 @@ func upload(args []string) {
 	fmt.Fprintf(os.Stderr, "skicka: Getting list of files to upload... ")
 	existingFiles := getFilesAtRemotePath(drivePath, recursive, includeBase,
 		mustExist)
-	fmt.Fprintf(os.Stderr, "Done. Starting upload.\n")
+	fmt.Fprintf(os.Stderr, "Done.\n")
 
 	syncStartTime = time.Now()
 	err := syncHierarchyUp(localPath, drivePath, existingFiles, encrypt,
