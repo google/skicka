@@ -1125,22 +1125,21 @@ func getResumableUploadURI(driveFile *drive.File, contentType string,
 			uri := resp.Header["Location"][0]
 			debug.Printf("Got resumable upload URI %s", uri)
 			return uri, nil
-		} else {
-			if err != nil {
-				debug.Printf("getResumableUploadURI: %v", err)
-			}
-			if resp != nil {
-				b, _ := ioutil.ReadAll(resp.Body)
-				debug.Printf("getResumableUploadURI status %d\n"+
-					"Resp: %+v\nBody: %s", resp.StatusCode, *resp, b)
-			}
-			if ntries == 5 {
-				// Give up...
-				return "", err
-			} else {
-				exponentialBackoff(ntries, resp, err)
-			}
 		}
+		if err != nil {
+			debug.Printf("getResumableUploadURI: %v", err)
+		}
+		if resp != nil {
+			b, _ := ioutil.ReadAll(resp.Body)
+			debug.Printf("getResumableUploadURI status %d\n"+
+				"Resp: %+v\nBody: %s", resp.StatusCode, *resp, b)
+		}
+		if ntries == 5 {
+			// Give up...
+			return "", err
+		}
+
+		exponentialBackoff(ntries, resp, err)
 	}
 }
 
@@ -1265,12 +1264,12 @@ func handleResumableUploadResponse(resp *http.Response, err error, driveFile *dr
 		debug.Printf("Got %v after updating URI from 404...", err)
 		if err != nil {
 			return Fail, err
-		} else {
-			// Use the new URI to find the offset to start at
-			*ntries = 0
-			return getCurrentChunkStart(*sessionURI, contentLength,
-				currentOffset)
 		}
+
+		// Use the new URI to find the offset to start at.
+		*ntries = 0
+		return getCurrentChunkStart(*sessionURI, contentLength,
+			currentOffset)
 
 	case resp.StatusCode == 401:
 		// After an hour, the OAuth2 token expires and needs to
@@ -1395,7 +1394,7 @@ func uploadFileContentsResumable(driveFile *drive.File, contentsReader io.Reader
 	// This should perhaps be a panic, as if we are able to upload all
 	// of the data but then the Drive API doesn't give us a 2xx reply
 	// with the last chunk, then something is really broken.
-	return fmt.Errorf("uploaded entire file but didn't get 2xx status on last chunk.")
+	return fmt.Errorf("uploaded entire file but didn't get 2xx status on last chunk")
 }
 
 func detectContentType(contentsReader io.Reader) (io.Reader, string, error) {
@@ -2349,7 +2348,7 @@ func syncHierarchyDown(drivePath string, localPath string,
 	// Both drivePath and localPath must be directories, or both must be files.
 	if stat, err := os.Stat(localPath); err == nil && len(filesOnDrive) == 1 &&
 		stat.IsDir() != isFolder(filesOnDrive[driveFilenames[0]]) {
-		printErrorAndExit(fmt.Errorf("skicka: %s: remote and local must both be directory or both be files.",
+		printErrorAndExit(fmt.Errorf("skicka: %s: remote and local must both be directory or both be files",
 			localPath))
 	}
 
@@ -2772,7 +2771,7 @@ func cat(args []string) {
 		printErrorAndExit(err)
 	}
 	if isFolder(file) {
-		printErrorAndExit(fmt.Errorf("skicka: %s: is a directory.", filename))
+		printErrorAndExit(fmt.Errorf("skicka: %s: is a directory", filename))
 	}
 
 	contentsReader, err := getDriveFileContentsReader(file)
@@ -2975,7 +2974,7 @@ func rm(args []string) {
 		printErrorAndExit(err)
 	}
 
-	for nTries := 5; ; nTries += 1 {
+	for nTries := 5; ; nTries++ {
 		err := deleteDriveFile(rmCmd)
 		if err == nil {
 			return
