@@ -1962,9 +1962,9 @@ func syncHierarchyUp(localPath string, driveRoot string,
 			uploadIndexMutex.Lock()
 			if uploadFrontIndex > uploadBackIndex {
 				// All files have been uploaded.
-				uploadIndexMutex.Unlock()
 				debug.Printf("All files uploaded [%d,%d]; exiting",
 					uploadFrontIndex, uploadBackIndex)
+				uploadIndexMutex.Unlock()
 				doneChan <- 1
 				break
 			}
@@ -1979,11 +1979,11 @@ func syncHierarchyUp(localPath string, driveRoot string,
 				index = uploadBackIndex
 				uploadBackIndex--
 			}
-			uploadIndexMutex.Unlock()
 			debug.Printf("Uploading %v %d [size %d], [%d,%d]",
 				startFromFront, index,
 				fileMappings[index].LocalFileInfo.Size(),
 				uploadFrontIndex, uploadBackIndex)
+			uploadIndexMutex.Unlock()
 
 			fm := fileMappings[index]
 			if fm.LocalFileInfo.IsDir() {
