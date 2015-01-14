@@ -1373,20 +1373,22 @@ func uploadFileContentsResumable(driveFile *drive.File, contentsReader io.Reader
 			return err
 		}
 
+		if status == Success {
+			// The entire file has been uploaded successfully.
+			atomic.AddInt64(&stats.UploadBytes, end-currentOffset)
+			atomic.AddInt64(&stats.DriveFilesUpdated, 1)
+			return nil
+		}
+
 		// We only account for the number of actually uploaded
 		// bytes by using the updated version of currentOffset
 		// here. For cases where only a partial chunk is uploaded,
 		// the progress bar may reflect more data being uploaded
 		// than actually was, due to it being updated based on what
 		// has been consumed from the original Reader. This is
-		// probably fine.
+		// probably fine; things get back in sync once we work
+		// through the bits buffered in the SomewhatSeekableReader.
 		atomic.AddInt64(&stats.UploadBytes, currentOffset-origCurrentOffset)
-
-		if status == Success {
-			// The entire file has been uploaded successfully.
-			atomic.AddInt64(&stats.DriveFilesUpdated, 1)
-			return nil
-		}
 
 		// Go around again and do the next chunk...
 	}
