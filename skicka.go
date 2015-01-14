@@ -2143,7 +2143,7 @@ func compileUploadFileTree(localPath, driveRoot string, encrypt bool) ([]LocalTo
 		}
 
 		if (info.Mode() & os.ModeSymlink) != 0 {
-			log.Printf("Ignoring symlink \"%s\".", path)
+			fmg.Printf("skicka: ignoring symlink \"%s\".", path)
 			return nil
 		}
 
