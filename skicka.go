@@ -1478,11 +1478,7 @@ func uploadFileContents(driveFile *drive.File, contentsReader io.Reader,
 
 	switch handleHTTPResponse(resp, err, currentTry) {
 	case Success:
-		if debug {
-			b, _ := ioutil.ReadAll(resp.Body)
-			debug.Printf("Success for %s: code %d, body %s",
-				driveFile.Title, resp.StatusCode, b)
-		}
+		debug.Printf("Success for %s: code %d", driveFile.Title, resp.StatusCode)
 		atomic.AddInt64(&stats.UploadBytes, length)
 		atomic.AddInt64(&stats.DriveFilesUpdated, 1)
 		return nil
@@ -1622,6 +1618,16 @@ type LocalToRemoteFileMapping struct {
 	LocalPath     string
 	RemotePath    string
 	LocalFileInfo os.FileInfo
+}
+
+// Implement sort.Interface so that we can sort arrays of
+// LocalToRemoteFileMapping by file size.
+type LocalToRemoteBySize []LocalToRemoteFileMapping
+
+func (l2r LocalToRemoteBySize) Len() int      { return len(l2r) }
+func (l2r LocalToRemoteBySize) Swap(i, j int) { l2r[i], l2r[j] = l2r[j], l2r[i] }
+func (l2r LocalToRemoteBySize) Less(i, j int) bool {
+	return l2r[i].LocalFileInfo.Size() < l2r[j].LocalFileInfo.Size()
 }
 
 // Perform fairly inexpensive comparisons of the file size and last modification
@@ -1928,27 +1934,67 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	// uploading lots of large files...)
 	nWorkers := 4
 
-	// Create a channel that holds indices into the filesToSync array for
-	// the workers to consume.
-	indexChan := make(chan int)
+	// Upload worker threads send a value over this channel when
+	// they're done; the code that launches them waits for all of them
+	// to do so before returning.
 	doneChan := make(chan int)
 
-	uploadWorker := func() {
+	// Sort the files by size, small to large.
+	sort.Sort(LocalToRemoteBySize(fileMappings))
+
+	// All but one of the upload threads will grab files to upload
+	// starting from the begining of the array, thus doing the smallest
+	// files first; one thread starts from the back of the array, doing
+	// the largest files first.  In this way, the large files help
+	// saturate the available upload bandwidth and hide the fixed
+	// overhead of creating the smaller files.
+	//
+	// The two indices, uploadFrontIndex, and uploadBackIndex, point to
+	// elements in the fileMappings array; access to both of them is
+	// protected by uploadIndexMutex. The front index is advanced
+	// forward each time it is used to select a file to upload and the
+	// back index moves backwards after it's used.
+	var uploadIndexMutex sync.Mutex
+	uploadFrontIndex := 0
+	uploadBackIndex := len(fileMappings) - 1
+
+	uploadWorker := func(startFromFront bool) {
 		for {
-			index := <-indexChan
-			if index < 0 {
-				debug.Printf("Worker got index %d; exiting", index)
+			uploadIndexMutex.Lock()
+			if uploadFrontIndex > uploadBackIndex {
+				// All files have been uploaded.
+				uploadIndexMutex.Unlock()
+				debug.Printf("All files uploaded [%d,%d]; exiting",
+					uploadFrontIndex, uploadBackIndex)
 				doneChan <- 1
 				break
 			}
 
-			localFile := fileMappings[index]
+			// Get the index into fileMappings for the next
+			// file this worker should upload.
+			var index int
+			if startFromFront {
+				index = uploadFrontIndex
+				uploadFrontIndex++
+			} else {
+				index = uploadBackIndex
+				uploadBackIndex--
+			}
+			uploadIndexMutex.Unlock()
+			debug.Printf("Uploading %v %d [size %d], [%d,%d]",
+				startFromFront, index,
+				fileMappings[index].LocalFileInfo.Size(),
+				uploadFrontIndex, uploadBackIndex)
 
-			err = syncFileUp(localFile, encrypt, existingFiles, progressBar)
+			fm := fileMappings[index]
+			if fm.LocalFileInfo.IsDir() {
+				continue
+			}
+
+			err = syncFileUp(fm, encrypt, existingFiles, progressBar)
 			if err != nil {
 				atomic.AddInt32(&nUploadErrors, 1)
-				fmt.Fprintf(os.Stderr, "skicka: %s: %v",
-					localFile.LocalPath, err)
+				fmt.Fprintf(os.Stderr, "skicka: %s: %v", fm.LocalPath, err)
 			}
 			updateActiveMemory()
 		}
@@ -1956,19 +2002,11 @@ func syncHierarchyUp(localPath string, driveRoot string,
 
 	// Launch the workers.
 	for i := 0; i < nWorkers; i++ {
-		go uploadWorker()
+		// All workers except the first one start from the front of
+		// the array.
+		go uploadWorker(i != 0)
 	}
-	// Communicate the indices of the entries in the localFiles[] array
-	// to be processed by the workers.
-	for index, file := range fileMappings {
-		if !file.LocalFileInfo.IsDir() {
-			indexChan <- index
-		}
-	}
-	// -1 signifies "no more work"; workers exit when they see this.
-	for i := 0; i < nWorkers; i++ {
-		indexChan <- -1
-	}
+
 	// Wait for all of the workers to finish.
 	for i := 0; i < nWorkers; i++ {
 		<-doneChan
@@ -1983,7 +2021,8 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	return fmt.Errorf("%d files not uploaded due to errors", nUploadErrors)
 }
 
-func filterFilesToUpload(fileMappings []LocalToRemoteFileMapping, existingDriveFiles map[string]*drive.File,
+func filterFilesToUpload(fileMappings []LocalToRemoteFileMapping,
+	existingDriveFiles map[string]*drive.File,
 	encrypt, ignoreTimes bool) ([]LocalToRemoteFileMapping, error) {
 
 	// files to be uploaded are kept in this slice
@@ -1996,7 +2035,8 @@ func filterFilesToUpload(fileMappings []LocalToRemoteFileMapping, existingDriveF
 		} else {
 			// The file already exists on Drive; just make sure it has all
 			// of the properties that we expect.
-			if err := createMissingProperties(driveFile, file.LocalFileInfo.Mode(), encrypt); err != nil {
+			if err := createMissingProperties(driveFile, file.LocalFileInfo.Mode(),
+				encrypt); err != nil {
 
 				return nil, err
 			}
