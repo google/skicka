@@ -1181,13 +1181,10 @@ func getCurrentChunkStart(sessionURI string, contentLength int64,
 				"content-range...", *currentOffset)
 			return Retry, nil
 		} else if resp.StatusCode == 401 {
-			debug.Printf("XX Trying OAuth2 token refresh.")
-			debug.Printf("Token was %s", oAuthTransport.Token.AccessToken)
+			debug.Printf("Trying OAuth2 token refresh.")
 			for r := 0; r < 6; r++ {
 				if err = oAuthTransport.Refresh(); err == nil {
-					debug.Printf("XX refresh success3")
-					debug.Printf("Refreshed token is now %s",
-						oAuthTransport.Token.AccessToken)
+					debug.Printf("Token refresh success")
 					// Now once again try the PUT...
 					break
 				} else {
@@ -1195,7 +1192,6 @@ func getCurrentChunkStart(sessionURI string, contentLength int64,
 					exponentialBackoff(r, nil, err)
 				}
 			}
-		} else {
 		}
 	}
 	debug.Printf("couldn't recover from 503...")
