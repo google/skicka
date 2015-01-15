@@ -1887,7 +1887,8 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	checkFatalError(err, "skicka: error determining files to sync: %v")
 
 	if len(fileMappings) == 0 {
-		fmt.Fprintln(os.Stderr, "There are no new files that need to be uploaded.")
+		fmt.Fprintln(os.Stderr,
+			"skicka: there are no new files that need to be uploaded.")
 		return nil
 	}
 
