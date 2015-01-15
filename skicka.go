@@ -2008,7 +2008,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 			err = syncFileUp(fm, encrypt, existingFiles, fileProgressBar)
 			if err != nil {
 				atomic.AddInt32(&nUploadErrors, 1)
-				fmt.Fprintf(os.Stderr, "skicka: %s: %v", fm.LocalPath, err)
+				fmt.Fprintf(os.Stderr, "\nskicka: %s: %v", fm.LocalPath, err)
 			}
 			updateActiveMemory()
 		}
@@ -2032,7 +2032,8 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	if nUploadErrors == 0 {
 		return nil
 	}
-	return fmt.Errorf("%d files not uploaded due to errors", nUploadErrors)
+	return fmt.Errorf("%d files not uploaded due to errors. "+
+		"This is likely a transient failure; try uploading again", nUploadErrors)
 }
 
 func filterFilesToUpload(fileMappings []LocalToRemoteFileMapping,
