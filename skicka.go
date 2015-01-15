@@ -1176,7 +1176,10 @@ func getCurrentChunkStart(sessionURI string, contentLength int64,
 				resp.StatusCode)
 			return Success, nil
 		} else if resp.StatusCode == 308 {
-			*currentOffset = updateStartFromResponse(resp)
+			*currentOffset, err = updateStartFromResponse(resp)
+			if err != nil {
+				return Fail, err
+			}
 			debug.Printf("Updated start to %d after 308 from get "+
 				"content-range...", *currentOffset)
 			return Retry, nil
@@ -1204,13 +1207,13 @@ func getCurrentChunkStart(sessionURI string, contentLength int64,
 // the range we tried to upload, if there was an error partway through.
 // This function returns this offset, so that the next chunk upload can
 // start at the right place.
-func updateStartFromResponse(resp *http.Response) int64 {
-	r := resp.Header["Range"][0]
-	var rangeStart, rangeEnd int64
-	fmt.Sscanf(r, "bytes=%d-%d", &rangeStart, &rangeEnd)
-	debug.Printf("updateStartFromResponse: range %s -> start %d, end %d", r,
-		rangeStart, rangeEnd)
-	return rangeEnd + 1
+func updateStartFromResponse(resp *http.Response) (int64, error) {
+	if rangeString, ok := resp.Header["Range"]; ok && len(rangeString) > 0 {
+		var rangeStart, rangeEnd int64
+		fmt.Sscanf(rangeString[0], "bytes=%d-%d", &rangeStart, &rangeEnd)
+		return rangeEnd + 1, nil
+	}
+	return 0, fmt.Errorf("Malformed HTTP response to get range %v", *resp)
 }
 
 // When we upload a file chunk, a variety of responses may come back from
@@ -1247,7 +1250,10 @@ func handleResumableUploadResponse(resp *http.Response, err error, driveFile *dr
 		// This is the expected response when a chunk was uploaded
 		// successfully, but there are still more chunks to do
 		// before we're done.
-		*currentOffset = updateStartFromResponse(resp)
+		*currentOffset, err = updateStartFromResponse(resp)
+		if err != nil {
+			return Fail, err
+		}
 		*ntries = 0
 		debug.Printf("Updated currentOffset to %d after 308", *currentOffset)
 		return Retry, nil
