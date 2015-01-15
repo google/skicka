@@ -536,7 +536,7 @@ func handleHTTPResponse(resp *http.Response, err error, ntries int) HTTPResponse
 	// 403, 500, and 503 error codes come up for transient issues like
 	// hitting the rate limit for Drive SDK API calls, but sometimes we get
 	// other timeouts/connection resets here. Therefore, for all errors, we
-	// sleep (with exponential  backoff) and try again a few times before
+	// sleep (with exponential backoff) and try again a few times before
 	// giving up.
 	exponentialBackoff(ntries, resp, err)
 	return Retry
@@ -1227,7 +1227,15 @@ func handleResumableUploadResponse(resp *http.Response, err error, driveFile *dr
 	contentType string, contentLength int64, ntries *int, currentOffset *int64,
 	sessionURI *string) (HTTPResponseResult, error) {
 	if *ntries == 6 {
-		return Fail, fmt.Errorf("giving up after 6 retries")
+		if err != nil {
+			return Fail, fmt.Errorf("giving up after 6 retries: %v", err)
+		} else if resp.StatusCode == 403 {
+			return Fail, fmt.Errorf("giving up after 6 retries: " +
+				"rate limit exceeded")
+		} else {
+			return Fail, fmt.Errorf("giving up after 6 retries: %s",
+				resp.Status)
+		}
 	}
 
 	// Serious error (e.g. connection reset) where we didn't even get a
@@ -1313,7 +1321,7 @@ func uploadFileContentsResumable(driveFile *drive.File, contentsReader io.Reader
 		return err
 	}
 
-	// FIXME: what is a reasonable default here? Must be 256kB minimum.
+	// TODO: what is a reasonable default here? Must be 256kB minimum.
 	chunkSize := 1024 * 1024
 
 	seekableReader := MakeSomewhatSeekableReader(contentsReader, 2*chunkSize)
@@ -2009,7 +2017,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 			err = syncFileUp(fm, encrypt, existingFiles, fileProgressBar)
 			if err != nil {
 				atomic.AddInt32(&nUploadErrors, 1)
-				fmt.Fprintf(os.Stderr, "\nskicka: %s: %v", fm.LocalPath, err)
+				fmt.Fprintf(os.Stderr, "\nskicka: %s: %v\n", fm.LocalPath, err)
 			}
 			updateActiveMemory()
 		}
@@ -2499,6 +2507,7 @@ func addErrorAndPrintMessage(totalErrors *int32, message string, err error) {
 }
 
 func printErrorAndExit(err error) {
+	fmt.Fprintf(os.Stderr, "\r") // erase progress bar, if any
 	fmt.Fprintln(os.Stderr, err)
 	os.Exit(1)
 }
