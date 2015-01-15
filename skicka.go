@@ -1314,7 +1314,7 @@ func uploadFileContentsResumable(driveFile *drive.File, contentsReader io.Reader
 	}
 
 	// FIXME: what is a reasonable default here? Must be 256kB minimum.
-	chunkSize := 4096 * 1024
+	chunkSize := 1024 * 1024
 
 	seekableReader := MakeSomewhatSeekableReader(contentsReader, 2*chunkSize)
 
