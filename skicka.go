@@ -1461,7 +1461,7 @@ func uploadFileContents(driveFile *drive.File, contentsReader io.Reader,
 	length int64, currentTry int) error {
 	// Only run the resumable upload path for large files (it
 	// introduces some overhead that isn't worth it for smaller files.)
-	if length > 1024*1024 {
+	if length > 64*1024*1024 {
 		return uploadFileContentsResumable(driveFile, contentsReader, length)
 	}
 
