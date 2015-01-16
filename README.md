@@ -303,7 +303,7 @@ the printed text to the `[encryption]` section of the file.  You can now
 upload and encrypt files:
 
 ```
-% env SKICKA_PASSPHRASE=mySecretPassphrase skicka upload ~/backups /backups
+% env SKICKA_PASSPHRASE=mySecretPassphrase skicka upload -encrypt ~/backups /backups
 ```
 
 **If you lose your encryption key or forget your passphrase, your encrypted
