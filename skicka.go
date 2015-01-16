@@ -1769,9 +1769,12 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 	var driveFile *drive.File
 
 	if fileMapping.LocalFileInfo.IsDir() {
-		driveFile, _ = createDriveFolder(baseName,
+		driveFile, err = createDriveFolder(baseName,
 			fileMapping.LocalFileInfo.Mode(), fileMapping.LocalFileInfo.ModTime(),
 			parentFile)
+		if err != nil {
+			return err
+		}
 		atomic.AddInt64(&stats.UploadBytes, fileMapping.LocalFileInfo.Size())
 		pb.Increment()
 		verbose.Printf("Created Google Drive folder %s", fileMapping.RemotePath)
