@@ -56,6 +56,7 @@ import (
 
 const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
 const encryptionSuffix = ".aes256"
+const resumableUploadMinSize = 64 * 1024 * 1024
 
 ///////////////////////////////////////////////////////////////////////////
 // Global Variables
@@ -1461,7 +1462,7 @@ func uploadFileContents(driveFile *drive.File, contentsReader io.Reader,
 	length int64, currentTry int) error {
 	// Only run the resumable upload path for large files (it
 	// introduces some overhead that isn't worth it for smaller files.)
-	if length > 64*1024*1024 {
+	if length > resumableUploadMinSize {
 		return uploadFileContentsResumable(driveFile, contentsReader, length)
 	}
 
@@ -1952,12 +1953,42 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	fileProgressBar.Prefix("Files: ")
 	fileProgressBar.Start()
 
-	// And finally actually update the files that look like they need it.
-	// Because round-trips to the Drive APIs take a while, we kick off multiple
-	// worker jobs to do the updates.  (However, we don't want too have too
-	// many workers; this would both lead to lots of 403 rate limit
-	// errors as well as possibly increase memory use too much if we're
-	// uploading lots of large files...)
+	// Sort the files by size, small to large.
+	sort.Sort(LocalToRemoteBySize(fileMappings))
+
+	// The two indices uploadFrontIndex and uploadBackIndex point to the
+	// range of elements in the fileMappings array that haven't yet been
+	// uploaded.
+	uploadFrontIndex := 0
+	uploadBackIndex := len(fileMappings) - 1
+
+	// First, upload any large files that will use the resumable upload
+	// protocol using a single thread; more threads here doesn't generally
+	// help improve bandwidth utilizaiton and seems to make rate limit
+	// errors from the Drive API more frequent...
+	for ; uploadBackIndex >= 0; uploadBackIndex-- {
+		if fileMappings[uploadBackIndex].LocalFileInfo.Size() < resumableUploadMinSize {
+			break
+		}
+
+		fm := fileMappings[uploadBackIndex]
+		if fm.LocalFileInfo.IsDir() {
+			continue
+		}
+
+		if err := syncFileUp(fm, encrypt, existingFiles, fileProgressBar); err != nil {
+			atomic.AddInt32(&nUploadErrors, 1)
+			fmt.Fprintf(os.Stderr, "\nskicka: %s: %v\n", fm.LocalPath, err)
+		}
+		updateActiveMemory()
+	}
+
+	// Smaller files will be handled with multiple threads going at once;
+	// doing so improves bandwidth utilization since round-trips to the
+	// Drive APIs take a while.  (However, we don't want too have too many
+	// workers; this would both lead to lots of 403 rate limit errors as
+	// well as possibly increase memory use too much if we're uploading
+	// lots of large files...)
 	nWorkers := 4
 
 	// Upload worker threads send a value over this channel when
@@ -1965,25 +1996,16 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	// to do so before returning.
 	doneChan := make(chan int)
 
-	// Sort the files by size, small to large.
-	sort.Sort(LocalToRemoteBySize(fileMappings))
-
-	// All but one of the upload threads will grab files to upload
-	// starting from the begining of the array, thus doing the smallest
-	// files first; one thread starts from the back of the array, doing
-	// the largest files first.  In this way, the large files help
-	// saturate the available upload bandwidth and hide the fixed
-	// overhead of creating the smaller files.
-	//
-	// The two indices, uploadFrontIndex, and uploadBackIndex, point to
-	// elements in the fileMappings array; access to both of them is
-	// protected by uploadIndexMutex. The front index is advanced
-	// forward each time it is used to select a file to upload and the
-	// back index moves backwards after it's used.
+	// Now that multiple threads are running, we need a mutex to protect
+	// access to uploadFrontIndex and uploadBackIndex.
 	var uploadIndexMutex sync.Mutex
-	uploadFrontIndex := 0
-	uploadBackIndex := len(fileMappings) - 1
 
+	// All but one of the upload threads will grab files to upload starting
+	// from the begining of the fileMappings array, thus doing the smallest
+	// files first; one thread starts from the back of the array, doing the
+	// largest files first.  In this way, the large files help saturate the
+	// available upload bandwidth and hide the fixed overhead of creating
+	// the smaller files.
 	uploadWorker := func(startFromFront bool) {
 		for {
 			uploadIndexMutex.Lock()
@@ -1996,8 +2018,8 @@ func syncHierarchyUp(localPath string, driveRoot string,
 				break
 			}
 
-			// Get the index into fileMappings for the next
-			// file this worker should upload.
+			// Get the index into fileMappings for the next file this
+			// worker should upload.
 			var index int
 			if startFromFront {
 				index = uploadFrontIndex
@@ -2006,10 +2028,6 @@ func syncHierarchyUp(localPath string, driveRoot string,
 				index = uploadBackIndex
 				uploadBackIndex--
 			}
-			debug.Printf("Uploading %v %d [size %d], [%d,%d]",
-				startFromFront, index,
-				fileMappings[index].LocalFileInfo.Size(),
-				uploadFrontIndex, uploadBackIndex)
 			uploadIndexMutex.Unlock()
 
 			fm := fileMappings[index]
