@@ -1928,24 +1928,26 @@ func syncHierarchyUp(localPath string, driveRoot string,
 
 	nUploadErrors := int32(0)
 
-	dirProgressBar := pb.New(len(directoryNames))
-	dirProgressBar.ShowBar = true
-	dirProgressBar.Output = os.Stderr
-	dirProgressBar.Prefix("Directories: ")
-	dirProgressBar.Start()
+	if len(directoryNames) > 0 {
+		dirProgressBar := pb.New(len(directoryNames))
+		dirProgressBar.ShowBar = true
+		dirProgressBar.Output = os.Stderr
+		dirProgressBar.Prefix("Directories: ")
+		dirProgressBar.Start()
 
-	// And finally sync the directories, which serves to create any missing ones.
-	for _, dirName := range directoryNames {
-		file := directoryMappingMap[dirName]
-		err = syncFileUp(file, encrypt, existingFiles, dirProgressBar)
-		if err != nil {
-			nUploadErrors++
-			printErrorAndExit(fmt.Errorf("skicka: %s: %v", file.LocalPath, err))
+		// And finally sync the directories, which serves to create any missing ones.
+		for _, dirName := range directoryNames {
+			file := directoryMappingMap[dirName]
+			err = syncFileUp(file, encrypt, existingFiles, dirProgressBar)
+			if err != nil {
+				nUploadErrors++
+				printErrorAndExit(fmt.Errorf("skicka: %s: %v", file.LocalPath, err))
+			}
+			updateActiveMemory()
 		}
-		updateActiveMemory()
+		dirProgressBar.Finish()
+		timeDelta("Create Google Drive directories")
 	}
-	dirProgressBar.Finish()
-	timeDelta("Create Google Drive directories")
 
 	fileProgressBar := pb.New64(nBytesToUpload).SetUnits(pb.U_BYTES)
 	fileProgressBar.ShowBar = true
