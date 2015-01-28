@@ -34,9 +34,9 @@ software.  Bug reports are welcome.
 ##Getting Started
 
 1. You must have a [Go](http://golang.org) compiler installed.
-2. Download skicka: `go get github.com/google/skicka`
-3. Build skicka: run `go build github.com/google/skicka`. Copy the `skicka`
-   executable to a directory in your `PATH`.
+2. Download and build skicka: `go get github.com/google/skicka`
+3. Either copy the `skicka` executable in `$GOPATH/bin` to a directory in
+   your `PATH`, or add `$GOPATH/bin` to your `PATH`.
 4. Configure skicka:
    - Run `skicka init` to create a skeleton `~/.skicka.config` file.
    - Create Google Developer credentials for skicka to use the Google
