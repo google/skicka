@@ -23,7 +23,6 @@ import (
 	"bytes"
 	"code.google.com/p/gcfg"
 	"code.google.com/p/go.crypto/pbkdf2"
-	"code.google.com/p/goauth2/oauth"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/md5"
@@ -33,6 +32,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/cheggaaa/pb"
+	"github.com/google/skicka/gdrive"
 	"google.golang.org/api/drive/v2"
 	"google.golang.org/api/googleapi"
 	"io"
@@ -64,8 +64,7 @@ const resumableUploadMinSize = 64 * 1024 * 1024
 type debugging bool
 
 var (
-	oAuthTransport *oauth.Transport
-	drivesvc       *drive.Service
+	gd *gdrive.GDrive
 
 	// The key is only set if encryption is needed (i.e. if -encrypt is
 	// provided for an upload, or if an encrypted file is encountered
@@ -527,7 +526,7 @@ func handleHTTPResponse(resp *http.Response, err error, ntries int) HTTPResponse
 		// After an hour, the OAuth2 token expires and needs to
 		// be refreshed.
 		debug.Printf("Trying OAuth2 token refresh.")
-		if err = oAuthTransport.Refresh(); err == nil {
+		if err = gd.OAuthTransport.Refresh(); err == nil {
 			// Success
 			return Retry
 		}
@@ -684,32 +683,6 @@ func decryptEncryptionKey() ([]byte, error) {
 ///////////////////////////////////////////////////////////////////////////
 // Google Drive utility functions
 
-// Google Drive identifies each file with a unique Id string; this function
-// returns the *drive.File corresponding to a given Id, dealing with
-// timeouts and transient errors.
-func getFileById(id string) (*drive.File, error) {
-	for ntries := 0; ; ntries++ {
-		file, err := drivesvc.Files.Get(id).Do()
-		if err == nil {
-			return file, nil
-		} else if err = tryToHandleDriveAPIError(err, ntries); err != nil {
-			return nil, err
-		}
-	}
-}
-
-func addProperty(prop *drive.Property, driveFile *drive.File) error {
-	for ntries := 0; ; ntries++ {
-		_, err := drivesvc.Properties.Insert(driveFile.Id, prop).Do()
-		if err == nil {
-			return nil
-		} else if err = tryToHandleDriveAPIError(err, ntries); err != nil {
-			return fmt.Errorf("unable to create %s property: %v",
-				prop.Key, err)
-		}
-	}
-}
-
 // Execute the given query with the Google Drive API, returning an array of
 // files that match the query's conditions. Handles transient HTTP errors and
 // the like.
@@ -717,7 +690,7 @@ func runDriveQuery(query string) []*drive.File {
 	pageToken := ""
 	var result []*drive.File
 	for {
-		q := drivesvc.Files.List().Q(query)
+		q := gd.Svc.Files.List().Q(query)
 		if pageToken != "" {
 			q = q.PageToken(pageToken)
 		}
@@ -750,7 +723,7 @@ func deleteIncompleteDriveFiles(title string, parentId string) {
 	files := runDriveQuery(query)
 	for _, f := range files {
 		for ntries := 0; ; ntries++ {
-			err := drivesvc.Files.Delete(f.Id).Do()
+			err := gd.Svc.Files.Delete(f.Id).Do()
 			if err == nil {
 				return
 			} else if err = tryToHandleDriveAPIError(err, ntries); err != nil {
@@ -767,30 +740,24 @@ func deleteIncompleteDriveFiles(title string, parentId string) {
 func createMissingProperties(f *drive.File, mode os.FileMode, encrypt bool) error {
 	if !isFolder(f) {
 		if encrypt {
-			if _, err := getProperty(f, "IV"); err != nil {
+			if _, err := gdrive.GetProperty(f, "IV"); err != nil {
 				// Compute a unique IV for the file.
 				iv := getRandomBytes(aes.BlockSize)
 				ivhex := hex.EncodeToString(iv)
 
-				ivprop := new(drive.Property)
-				ivprop.Key = "IV"
-				ivprop.Value = ivhex
 				debug.Printf("Creating IV property for file %s, "+
 					"which doesn't have one.", f.Title)
-				err := addProperty(ivprop, f)
+				err := gd.AddProperty("IV", ivhex, f)
 				if err != nil {
 					return err
 				}
 			}
 		}
 	}
-	if _, err := getProperty(f, "Permissions"); err != nil {
-		syncprop := new(drive.Property)
-		syncprop.Key = "Permissions"
-		syncprop.Value = fmt.Sprintf("%#o", mode&os.ModePerm)
+	if _, err := gdrive.GetProperty(f, "Permissions"); err != nil {
 		debug.Printf("Creating Permissions property for file %s, "+
 			"which doesn't have one.", f.Title)
-		err := addProperty(syncprop, f)
+		err := gd.AddProperty("Permissions", fmt.Sprintf("%#o", mode&os.ModePerm), f)
 		if err != nil {
 			return err
 		}
@@ -802,7 +769,7 @@ func createMissingProperties(f *drive.File, mode os.FileMode, encrypt bool) erro
 // Drive. The returned a *drive.File represents the file in Drive.
 func insertNewDriveFile(f *drive.File) (*drive.File, error) {
 	for ntries := 0; ; ntries++ {
-		r, err := drivesvc.Files.Insert(f).Do()
+		r, err := gd.Svc.Files.Insert(f).Do()
 		if err == nil {
 			debug.Printf("Created new Google Drive file for %s: ID=%s",
 				f.Title, r.Id)
@@ -906,7 +873,7 @@ func (err removeDirectoryError) Error() string {
 // root of the Google Drive filesystem.  (Note that *drive.File is used to
 // represent both files and folders in Google Drive.)
 func getDriveFile(path string) (*drive.File, error) {
-	parent, err := getFileById("root")
+	parent, err := gd.GetFileById("root")
 	if err != nil {
 		return nil, fmt.Errorf("unable to get Drive root directory: %v", err)
 	}
@@ -999,25 +966,12 @@ func getFilesAtRemotePath(path string, recursive, includeBase,
 	return existingFiles
 }
 
-// Google Drive files can have properties associated with them, which are
-// basically maps from strings to strings. Given a Google Drive file and a
-// property name, this function returns the property value, if the named
-// property is present.
-func getProperty(driveFile *drive.File, name string) (string, error) {
-	for _, prop := range driveFile.Properties {
-		if prop.Key == name {
-			return prop.Value, nil
-		}
-	}
-	return "", fmt.Errorf("%s: property not found", name)
-}
-
 // Returns the initialization vector (for encryption) for the given file.
 // We store the initialization vector as a hex-encoded property in the
 // file so that we don't need to download the file's contents to find the
 // IV.
 func getInitializationVector(driveFile *drive.File) ([]byte, error) {
-	ivhex, err := getProperty(driveFile, "IV")
+	ivhex, err := gdrive.GetProperty(driveFile, "IV")
 	if err != nil {
 		return nil, err
 	}
@@ -1036,7 +990,7 @@ func updateModificationTime(driveFile *drive.File, t time.Time) error {
 
 	for ntries := 0; ; ntries++ {
 		f := &drive.File{ModifiedDate: t.UTC().Format(timeFormat)}
-		_, err := drivesvc.Files.Patch(driveFile.Id, f).SetModifiedDate(true).Do()
+		_, err := gd.Svc.Files.Patch(driveFile.Id, f).SetModifiedDate(true).Do()
 		if err == nil {
 			debug.Printf("success: updated modification time on %s", driveFile.Title)
 			return nil
@@ -1053,18 +1007,18 @@ func updatePermissions(driveFile *drive.File, mode os.FileMode) error {
 }
 
 func updateProperty(driveFile *drive.File, name string, newValue string) error {
-	if oldValue, err := getProperty(driveFile, name); err == nil {
+	if oldValue, err := gdrive.GetProperty(driveFile, name); err == nil {
 		if oldValue == newValue {
 			return nil
 		}
 	}
 
 	for nTriesGet := 0; ; nTriesGet++ {
-		prop, err := drivesvc.Properties.Get(driveFile.Id, name).Do()
+		prop, err := gd.Svc.Properties.Get(driveFile.Id, name).Do()
 		if err == nil {
 			prop.Value = newValue
 			for nTriesUpdate := 0; ; nTriesUpdate++ {
-				_, err = drivesvc.Properties.Update(driveFile.Id,
+				_, err = gd.Svc.Properties.Update(driveFile.Id,
 					name, prop).Do()
 				if err == nil {
 					// success
@@ -1088,7 +1042,7 @@ func getModificationTime(driveFile *drive.File) (time.Time, error) {
 }
 
 func getPermissions(driveFile *drive.File) (os.FileMode, error) {
-	permStr, err := getProperty(driveFile, "Permissions")
+	permStr, err := gdrive.GetProperty(driveFile, "Permissions")
 	if err != nil {
 		return 0, err
 	}
@@ -1120,7 +1074,7 @@ func getResumableUploadURI(driveFile *drive.File, contentType string,
 
 	for ntries := 0; ; ntries++ {
 		debug.Printf("Trying to get session URI")
-		resp, err := oAuthTransport.RoundTrip(req)
+		resp, err := gd.OAuthTransport.RoundTrip(req)
 
 		if err == nil && resp != nil && resp.StatusCode == 200 {
 			uri := resp.Header["Location"][0]
@@ -1157,7 +1111,7 @@ func getCurrentChunkStart(sessionURI string, contentLength int64,
 		req.Header.Set("Content-Length", "0")
 		req.ContentLength = 0
 		req.Header.Set("User-Agent", "skicka/0.1")
-		resp, err := oAuthTransport.RoundTrip(req)
+		resp, err := gd.OAuthTransport.RoundTrip(req)
 
 		if resp == nil {
 			debug.Printf("get current chunk start err %v", err)
@@ -1187,7 +1141,7 @@ func getCurrentChunkStart(sessionURI string, contentLength int64,
 		} else if resp.StatusCode == 401 {
 			debug.Printf("Trying OAuth2 token refresh.")
 			for r := 0; r < 6; r++ {
-				if err = oAuthTransport.Refresh(); err == nil {
+				if err = gd.OAuthTransport.Refresh(); err == nil {
 					debug.Printf("Token refresh success")
 					// Now once again try the PUT...
 					break
@@ -1287,7 +1241,7 @@ func handleResumableUploadResponse(resp *http.Response, err error, driveFile *dr
 		// be refreshed.
 		debug.Printf("Trying OAuth2 token refresh.")
 		for r := 0; r < 6; r++ {
-			if err = oAuthTransport.Refresh(); err == nil {
+			if err = gd.OAuthTransport.Refresh(); err == nil {
 				// Successful refresh; make sure we have
 				// the right offset for the next time
 				// around.
@@ -1370,7 +1324,7 @@ func uploadFileContentsResumable(driveFile *drive.File, contentsReader io.Reader
 		req.Header.Set("User-Agent", "skicka/0.1")
 
 		// Actually (try to) upload the chunk.
-		resp, err := oAuthTransport.RoundTrip(req)
+		resp, err := gd.OAuthTransport.RoundTrip(req)
 
 		origCurrentOffset := currentOffset
 		status, err := handleResumableUploadResponse(resp, err,
@@ -1483,7 +1437,7 @@ func uploadFileContents(driveFile *drive.File, contentsReader io.Reader,
 	}
 
 	// And send it off...
-	resp, err := oAuthTransport.RoundTrip(req)
+	resp, err := gd.OAuthTransport.RoundTrip(req)
 	if resp != nil {
 		defer googleapi.CloseBody(resp)
 	}
@@ -1518,7 +1472,7 @@ func getDriveFileContentsReader(driveFile *drive.File) (io.ReadCloser, error) {
 	// The file download URL expires some hours after it's retrieved;
 	// re-grab the file right before downloading it so that we have a
 	// fresh URL.
-	driveFile, err := getFileById(driveFile.Id)
+	driveFile, err := gd.GetFileById(driveFile.Id)
 	if err != nil {
 		return nil, err
 	}
@@ -1535,7 +1489,7 @@ func getDriveFileContentsReader(driveFile *drive.File) (io.ReadCloser, error) {
 			return nil, err
 		}
 
-		resp, err := oAuthTransport.RoundTrip(request)
+		resp, err := gd.OAuthTransport.RoundTrip(request)
 
 		switch handleHTTPResponse(resp, err, ntries) {
 		case Success:
@@ -1572,7 +1526,7 @@ func tryToHandleDriveAPIError(err error, ntries int) error {
 			// After an hour, the OAuth2 token expires and needs to
 			// be refreshed.
 			debug.Printf("Trying OAuth2 token refresh.")
-			if err := oAuthTransport.Refresh(); err == nil {
+			if err := gd.OAuthTransport.Refresh(); err == nil {
 				// Success
 				return nil
 			}
@@ -1582,40 +1536,6 @@ func tryToHandleDriveAPIError(err error, ntries int) error {
 
 	exponentialBackoff(ntries, nil, err)
 	return nil
-}
-
-func createDriveClient(clientid, clientsecret, cacheFile string) error {
-	config := &oauth.Config{
-		ClientId:     clientid,
-		ClientSecret: clientsecret,
-		Scope:        "https://www.googleapis.com/auth/drive",
-		RedirectURL:  "urn:ietf:wg:oauth:2.0:oob",
-		AuthURL:      "https://accounts.google.com/o/oauth2/auth",
-		TokenURL:     "https://accounts.google.com/o/oauth2/token",
-		TokenCache:   oauth.CacheFile(cacheFile),
-	}
-
-	oAuthTransport = &oauth.Transport{
-		Config:    config,
-		Transport: http.DefaultTransport,
-	}
-
-	token, err := config.TokenCache.Token()
-	if err != nil {
-		authURL := config.AuthCodeURL("state")
-		fmt.Printf("Go to the following link in your browser:\n%v\n", authURL)
-		fmt.Printf("Enter verification code: ")
-		var code string
-		fmt.Scanln(&code)
-		token, err = oAuthTransport.Exchange(code)
-		if err != nil {
-			log.Fatalf("OAuth2 exchange failed: %v\n", err)
-		}
-	}
-	oAuthTransport.Token = token
-
-	drivesvc, err = drive.New(oAuthTransport.Client())
-	return err
 }
 
 func isFolder(f *drive.File) bool {
@@ -2221,7 +2141,7 @@ func compileUploadFileTree(localPath, driveRoot string, encrypt bool) ([]LocalTo
 // these indicators are inconsistent; otherwise, it returns true/false
 // accordingly.
 func isEncrypted(file *drive.File) (bool, error) {
-	if _, err := getProperty(file, "IV"); err == nil {
+	if _, err := gdrive.GetProperty(file, "IV"); err == nil {
 		if strings.HasSuffix(file.Title, encryptionSuffix) {
 			return true, nil
 		}
@@ -2850,7 +2770,7 @@ func mkdir(args []string) {
 	}
 	drivePath := filepath.Clean(args[i])
 
-	parent, err := getFileById("root")
+	parent, err := gd.GetFileById("root")
 	if err != nil {
 		printErrorAndExit(fmt.Errorf("unable to get Drive root directory: %v", err))
 	}
@@ -3006,7 +2926,7 @@ func rm(args []string) {
 		recursive: recursive,
 		skipTrash: skipTrash,
 		path:      drivePath,
-		svc:       drivesvc,
+		svc:       gd.Svc,
 	}
 
 	if err := checkRmPossible(rmCmd, recursive); err != nil {
@@ -3288,8 +3208,8 @@ func main() {
 
 	readConfigFile(*configFilename)
 
-	err = createDriveClient(config.Google.ClientId, config.Google.ClientSecret,
-		*cachefile)
+	gd, err = gdrive.New(config.Google.ClientId, config.Google.ClientSecret,
+		*cachefile, bool(verbose), bool(debug))
 	if err != nil {
 		printErrorAndExit(fmt.Errorf("skicka: error creating Google Drive "+
 			"client: %v", err))
