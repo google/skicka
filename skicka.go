@@ -40,7 +40,6 @@ import (
 	"log"
 	mathrand "math/rand"
 	"net/http"
-	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -56,7 +55,6 @@ import (
 
 const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
 const encryptionSuffix = ".aes256"
-const resumableUploadMinSize = 64 * 1024 * 1024
 
 ///////////////////////////////////////////////////////////////////////////
 // Global Variables
@@ -119,18 +117,6 @@ func (d debugging) Printf(format string, args ...interface{}) {
 	}
 }
 
-// RetryHTTPTransmitError is a small struct to let us detect error cases
-// where the caller should retry the operation, as the error seems to be a
-// transient HTTP issue.
-type RetryHTTPTransmitError struct {
-	StatusCode int
-	StatusBody string
-}
-
-func (r RetryHTTPTransmitError) Error() string {
-	return fmt.Sprintf("http %d error (%s); retry", r.StatusCode, r.StatusBody)
-}
-
 type CommandSyntaxError struct {
 	Cmd string
 	Msg string
@@ -154,173 +140,6 @@ func (fc *FileCloser) Read(b []byte) (int, error) {
 
 func (fc *FileCloser) Close() error {
 	return fc.C.Close()
-}
-
-// SomewhatSeekableReader is an io.Reader that can seek backwards from the
-// current offset up to 'bufSize' bytes. It's useful for chunked file
-// uploads, where we may need to rewind a bit after a failed chunk, but
-// definitely don't want to pay the overhead of having the entire file in
-// memory.
-//
-// It is implemented as a ring-buffer: the current offset in buf to read
-// from is in readOffset, and the currentOffset to copy values read from
-// the reader to is in writeOffset.  Both of these are taken mod bufSize
-// when used to compute offsets into buf.
-type SomewhatSeekableReader struct {
-	R                       io.Reader
-	buf                     []byte
-	bufSize                 int
-	readOffset, writeOffset int64
-}
-
-func MakeSomewhatSeekableReader(r io.Reader, size int) *SomewhatSeekableReader {
-	return &SomewhatSeekableReader{
-		R:           r,
-		buf:         make([]byte, size),
-		bufSize:     size,
-		readOffset:  0,
-		writeOffset: 0,
-	}
-}
-
-func (ssr *SomewhatSeekableReader) Read(b []byte) (int, error) {
-	// If the caller has called Seek() to move backwards from the
-	// current read point of the underlying reader R, we start by
-	// copying values from our local buffer into the output buffer.
-	nCopied := 0
-	if ssr.readOffset < ssr.writeOffset {
-		for ; ssr.readOffset < ssr.writeOffset && nCopied < len(b); nCopied++ {
-			b[nCopied] = ssr.buf[ssr.readOffset%int64(ssr.bufSize)]
-			ssr.readOffset++
-		}
-		if nCopied == len(b) {
-			return nCopied, nil
-		}
-	}
-
-	// Once we're through the values we have locally buffered, we read
-	// from the underlying reader. Note that we read into b[] starting
-	// at the point where we stopped copying local values.
-	nRead, err := ssr.R.Read(b[nCopied:])
-
-	// Now update our local buffer of read values.  Note that this loop
-	// is a bit wasteful in the case where nRead > ssr.bufSize; some of
-	// the values it writes will be clobbered by a later iteration of
-	// the loop.  (It's not clear that this is a big enough issue to
-	// really worry about.)
-	for i := 0; i < nRead; i++ {
-		ssr.buf[ssr.writeOffset%int64(ssr.bufSize)] = b[nCopied+i]
-		ssr.readOffset++
-		ssr.writeOffset++
-	}
-
-	return nCopied + nRead, err
-}
-
-func (ssr *SomewhatSeekableReader) SeekTo(offset int64) error {
-	if offset > ssr.writeOffset {
-		panic("invalid seek")
-	}
-	if ssr.writeOffset-offset > int64(ssr.bufSize) {
-		return fmt.Errorf("can't seek back to %d; current offset %d",
-			offset, ssr.writeOffset)
-	}
-	ssr.readOffset = offset
-	return nil
-}
-
-///////////////////////////////////////////////////////////////////////////
-// Bandwidth-limiting io.Reader
-
-// Maximum number of bytes of data that we are currently allowed to
-// upload or download given the bandwidth limits set by the user, if any.
-// This value is reduced by the RateLimitedReader.Read() method when data is
-// uploaded or downloaded, and is periodically increased by the task
-// launched by launchBandwidthTask().
-var bandwidthBudget int
-
-// Mutex to protect bandwidthBudget.
-var bandwidthBudgetMutex sync.Mutex
-
-func launchBandwidthTask(bytesPerSecond int) {
-	if bytesPerSecond == 0 {
-		// No limit, so no need to launch the task.
-		return
-	}
-
-	go func() {
-		for {
-			bandwidthBudgetMutex.Lock()
-
-			// Release 1/8th of the per-second limit every 8th of a second.
-			// The 92/100 factor in the amount released adds some slop to
-			// account for TCP/IP overhead in an effort to have the actual
-			// bandwidth used not exceed the desired limit.
-			bandwidthBudget += bytesPerSecond * 92 / 100 / 8
-			if bandwidthBudget > bytesPerSecond {
-				bandwidthBudget = bytesPerSecond
-			}
-
-			bandwidthBudgetMutex.Unlock()
-			time.Sleep(time.Duration(125) * time.Millisecond)
-		}
-	}()
-}
-
-// RateLimitedReader is an io.Reader implementation that returns no more bytes
-// than the current value of bandwidthBudget.  Thus, as long as the upload and
-// download paths wrap the underlying io.Readers for local files and GETs
-// from Drive (respectively), then we should stay under the bandwidth per
-// second limit.
-type RateLimitedReader struct {
-	R io.Reader
-}
-
-func (lr RateLimitedReader) Read(dst []byte) (int, error) {
-	// Loop until some amount of bandwidth is available.
-	for {
-		bandwidthBudgetMutex.Lock()
-		if bandwidthBudget < 0 {
-			panic("bandwidth budget went negative")
-		}
-		if bandwidthBudget > 0 {
-			break
-		}
-
-		// No further uploading is possible at the moment;
-		// sleep for a bit and then we'll try the loop
-		// again and see if we have better luck...
-		// TODO: we could also wait on a condition
-		// variable and wait to be signaled by the "add
-		// more available upload bytes" thread.
-		bandwidthBudgetMutex.Unlock()
-		time.Sleep(time.Duration(100) * time.Millisecond)
-	}
-
-	// The caller would like us to return up to this many bytes...
-	n := len(dst)
-
-	// but don't try to upload more than we're allowed to...
-	if n > bandwidthBudget {
-		n = bandwidthBudget
-	}
-
-	// Update the budget for the maximum amount of what we may consume and
-	// relinquish the lock so that other workers can claim bandwidth.
-	bandwidthBudget -= n
-	bandwidthBudgetMutex.Unlock()
-
-	read, err := lr.R.Read(dst[:n])
-	if read < n {
-		// It may turn out that the amount we read from the original
-		// io.Reader is less than the caller asked for; in this case,
-		// we give back the bandwidth that we reserved but didn't use.
-		bandwidthBudgetMutex.Lock()
-		bandwidthBudget += n - read
-		bandwidthBudgetMutex.Unlock()
-	}
-
-	return read, err
 }
 
 type ByteCountingReader struct {
@@ -494,52 +313,6 @@ func exponentialBackoff(ntries int, resp *http.Response, err error) {
 	} else {
 		debug.Printf("exponential backoff: slept for error %v...", err)
 	}
-}
-
-type HTTPResponseResult int
-
-const (
-	Success    HTTPResponseResult = iota
-	Retry                         = iota
-	Fail                          = iota
-	RefreshURI                    = iota
-)
-
-const maxHTTPRetries = 6
-
-// We've gotten an *http.Response (maybe) and an error (maybe) back after
-// performing some HTTP operation; this function takes care of figuring
-// out if the operation succeeded, refreshes OAuth2 tokens if expiration
-// was the cause of the failure, takes care of exponential back-off for
-// transient errors, etc.  It then returns a HTTPResponseResult to the
-// caller, indicating how it should proceed.
-func handleHTTPResponse(resp *http.Response, err error, ntries int) HTTPResponseResult {
-	if err == nil && resp != nil && resp.StatusCode >= 200 && resp.StatusCode <= 299 {
-		return Success
-	}
-
-	if ntries == maxHTTPRetries {
-		return Fail
-	}
-
-	if resp != nil && resp.StatusCode == 401 {
-		// After an hour, the OAuth2 token expires and needs to
-		// be refreshed.
-		debug.Printf("Trying OAuth2 token refresh.")
-		if err = gd.OAuthTransport.Refresh(); err == nil {
-			// Success
-			return Retry
-		}
-		// Otherwise fall through to sleep
-	}
-
-	// 403, 500, and 503 error codes come up for transient issues like
-	// hitting the rate limit for Drive SDK API calls, but sometimes we get
-	// other timeouts/connection resets here. Therefore, for all errors, we
-	// sleep (with exponential backoff) and try again a few times before
-	// giving up.
-	exponentialBackoff(ntries, resp, err)
-	return Retry
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -881,423 +654,6 @@ func getPermissions(driveFile *drive.File) (os.FileMode, error) {
 	return os.FileMode(perm), err
 }
 
-func getResumableUploadURI(driveFile *drive.File, contentType string,
-	length int64) (string, error) {
-	params := make(url.Values)
-	params.Set("uploadType", "resumable")
-
-	urls := fmt.Sprintf("https://www.googleapis.com/upload/drive/v2/files/%s",
-		driveFile.Id)
-	urls += "?" + params.Encode()
-
-	body, err := googleapi.WithoutDataWrapper.JSONReader(driveFile)
-	if err != nil {
-		return "", err
-	}
-
-	req, _ := http.NewRequest("PUT", urls, body)
-	req.Header.Set("X-Upload-Content-Length", fmt.Sprintf("%d", length))
-	req.Header.Set("X-Upload-Content-Type", contentType)
-	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
-	req.Header.Set("User-Agent", "skicka/0.1")
-	// We actually don't need any content in the request, since we're
-	// PUTing to an existing file.
-
-	for ntries := 0; ; ntries++ {
-		debug.Printf("Trying to get session URI")
-		resp, err := gd.OAuthTransport.RoundTrip(req)
-
-		if err == nil && resp != nil && resp.StatusCode == 200 {
-			uri := resp.Header["Location"][0]
-			debug.Printf("Got resumable upload URI %s", uri)
-			return uri, nil
-		}
-		if err != nil {
-			debug.Printf("getResumableUploadURI: %v", err)
-		}
-		if resp != nil {
-			b, _ := ioutil.ReadAll(resp.Body)
-			debug.Printf("getResumableUploadURI status %d\n"+
-				"Resp: %+v\nBody: %s", resp.StatusCode, *resp, b)
-		}
-		if ntries == 5 {
-			// Give up...
-			return "", err
-		}
-
-		exponentialBackoff(ntries, resp, err)
-	}
-}
-
-// In certain error cases, we need to go back and query Drive as to how
-// much of a file has been successfully uploaded (and thence where we
-// should start for the next chunk.)  This function generates that query
-// and updates the provided *currentOffset parameter with the result.
-func getCurrentChunkStart(sessionURI string, contentLength int64,
-	currentOffset *int64) (HTTPResponseResult, error) {
-	var err error
-	for r := 0; r < 6; r++ {
-		req, _ := http.NewRequest("PUT", sessionURI, nil)
-		req.Header.Set("Content-Range", fmt.Sprintf("bytes */%d", contentLength))
-		req.Header.Set("Content-Length", "0")
-		req.ContentLength = 0
-		req.Header.Set("User-Agent", "skicka/0.1")
-		resp, err := gd.OAuthTransport.RoundTrip(req)
-
-		if resp == nil {
-			debug.Printf("get current chunk start err %v", err)
-			exponentialBackoff(r, resp, err)
-			continue
-		}
-
-		defer resp.Body.Close()
-		b, _ := ioutil.ReadAll(resp.Body)
-		debug.Printf("Get current chunk start err %v resp status %d, "+
-			"body %s\nRESP %v",
-			err, resp.StatusCode, b, *resp)
-
-		if resp.StatusCode == 200 || resp.StatusCode == 201 {
-			// 200 or 201 here says we're actually all done
-			debug.Printf("All done: %d from get content-range response",
-				resp.StatusCode)
-			return Success, nil
-		} else if resp.StatusCode == 308 {
-			*currentOffset, err = updateStartFromResponse(resp)
-			if err != nil {
-				return Fail, err
-			}
-			debug.Printf("Updated start to %d after 308 from get "+
-				"content-range...", *currentOffset)
-			return Retry, nil
-		} else if resp.StatusCode == 401 {
-			debug.Printf("Trying OAuth2 token refresh.")
-			for r := 0; r < 6; r++ {
-				if err = gd.OAuthTransport.Refresh(); err == nil {
-					debug.Printf("Token refresh success")
-					// Now once again try the PUT...
-					break
-				} else {
-					debug.Printf("refresh try %d fail %v", r, err)
-					exponentialBackoff(r, nil, err)
-				}
-			}
-		}
-	}
-	debug.Printf("couldn't recover from 503...")
-	return Fail, err
-}
-
-// The response we get back from uploading a file chunk includes a "Range"
-// field, which gives the range (inclusive!) of bytes that actually were
-// successfully uploaded; the ending byte offset may be before the end of
-// the range we tried to upload, if there was an error partway through.
-// This function returns this offset, so that the next chunk upload can
-// start at the right place.
-func updateStartFromResponse(resp *http.Response) (int64, error) {
-	if rangeString, ok := resp.Header["Range"]; ok && len(rangeString) > 0 {
-		var rangeStart, rangeEnd int64
-		fmt.Sscanf(rangeString[0], "bytes=%d-%d", &rangeStart, &rangeEnd)
-		return rangeEnd + 1, nil
-	}
-	return 0, fmt.Errorf("Malformed HTTP response to get range %v", *resp)
-}
-
-// When we upload a file chunk, a variety of responses may come back from
-// the server, ranging from permanent errors to transient errors, to
-// success codes.  This function processes the http.Response and maps it to
-// a HTTPResponseResult code.  It also may update *ntries, the conut of how
-// many times we've tried in a row to upload a chunk, *start, the current
-// offset into the file being uploaded, and *sessionURI, the URI to which
-// chunks for the file should be uploaded to.
-func handleResumableUploadResponse(resp *http.Response, err error, driveFile *drive.File,
-	contentType string, contentLength int64, ntries *int, currentOffset *int64,
-	sessionURI *string) (HTTPResponseResult, error) {
-	if *ntries == 6 {
-		if err != nil {
-			return Fail, fmt.Errorf("giving up after 6 retries: %v", err)
-		} else if resp.StatusCode == 403 {
-			return Fail, fmt.Errorf("giving up after 6 retries: " +
-				"rate limit exceeded")
-		} else {
-			return Fail, fmt.Errorf("giving up after 6 retries: %s",
-				resp.Status)
-		}
-	}
-
-	// Serious error (e.g. connection reset) where we didn't even get a
-	// HTTP response back from the server.  Try again (a few times).
-	if err != nil {
-		debug.Printf("handleResumableUploadResponse error %v", err)
-		exponentialBackoff(*ntries, resp, err)
-		return Retry, nil
-	}
-
-	debug.Printf("got status %d from chunk for file %s", resp.StatusCode,
-		driveFile.Id, resp)
-
-	switch {
-	case resp.StatusCode >= 200 && resp.StatusCode <= 299:
-		// Successfully uploaded the entire file.
-		return Success, nil
-
-	case resp.StatusCode == 308:
-		// This is the expected response when a chunk was uploaded
-		// successfully, but there are still more chunks to do
-		// before we're done.
-		*currentOffset, err = updateStartFromResponse(resp)
-		if err != nil {
-			return Fail, err
-		}
-		*ntries = 0
-		debug.Printf("Updated currentOffset to %d after 308", *currentOffset)
-		return Retry, nil
-
-	case resp.StatusCode == 404:
-		// The upload URI has expired; we need to refresh it. (It
-		// has a ~24 hour lifetime.)
-		*sessionURI, err = getResumableUploadURI(driveFile,
-			contentType, contentLength)
-		debug.Printf("Got %v after updating URI from 404...", err)
-		if err != nil {
-			return Fail, err
-		}
-
-		// Use the new URI to find the offset to start at.
-		*ntries = 0
-		return getCurrentChunkStart(*sessionURI, contentLength,
-			currentOffset)
-
-	case resp.StatusCode == 401:
-		// After an hour, the OAuth2 token expires and needs to
-		// be refreshed.
-		debug.Printf("Trying OAuth2 token refresh.")
-		for r := 0; r < 6; r++ {
-			if err = gd.OAuthTransport.Refresh(); err == nil {
-				// Successful refresh; make sure we have
-				// the right offset for the next time
-				// around.
-				return getCurrentChunkStart(*sessionURI, contentLength,
-					currentOffset)
-			}
-			debug.Printf("Token refresh fail %v", err)
-			exponentialBackoff(r, nil, err)
-		}
-		return Fail, err
-
-	case resp.StatusCode >= 500 && resp.StatusCode <= 599:
-		debug.Printf("5xx response")
-		return getCurrentChunkStart(*sessionURI, contentLength, currentOffset)
-
-	default:
-		exponentialBackoff(*ntries, resp, err)
-		return Retry, nil
-	}
-}
-
-func uploadFileContentsResumable(driveFile *drive.File, contentsReader io.Reader,
-	contentLength int64) error {
-	contentsReader, contentType, err := detectContentType(contentsReader)
-	if err != nil {
-		return err
-	}
-
-	sessionURI, err := getResumableUploadURI(driveFile, contentType,
-		contentLength)
-	if err != nil {
-		return err
-	}
-
-	// TODO: what is a reasonable default here? Must be 256kB minimum.
-	chunkSize := 1024 * 1024
-
-	seekableReader := MakeSomewhatSeekableReader(contentsReader, 2*chunkSize)
-
-	// Upload the file in chunks of size chunkSize (or smaller, for the
-	// very last chunk).
-	for currentOffset, ntries := int64(0), 0; currentOffset < contentLength; ntries++ {
-		end := currentOffset + int64(chunkSize)
-		if end > contentLength {
-			end = contentLength
-		}
-		debug.Printf("%s: uploading chunk %d - %d...", driveFile.Title,
-			currentOffset, end)
-
-		// We should usually already be at the current offset; this
-		// seek should be a no-op except in cases where the
-		// previous chunk had an error.
-		err = seekableReader.SeekTo(currentOffset)
-		if err != nil {
-			return err
-		}
-
-		// Only allow the current range of bytes to be uploaded
-		// with this PUT.
-		var body io.Reader = &io.LimitedReader{
-			R: seekableReader,
-			N: end - currentOffset,
-		}
-		if config.Upload.Bytes_per_second_limit > 0 {
-			body = &RateLimitedReader{R: body}
-		}
-
-		all, err := ioutil.ReadAll(body)
-		if int64(len(all)) != end-currentOffset {
-			log.Fatalf("reader gave us %d bytes, expected %d, bye", len(all),
-				end-currentOffset)
-		}
-		req, _ := http.NewRequest("PUT", sessionURI, bytes.NewReader(all))
-
-		//		req, _ := http.NewRequest("PUT", sessionURI, body)
-		req.ContentLength = int64(end - currentOffset)
-		req.Header.Set("Content-Type", contentType)
-		req.Header.Set("Content-Range",
-			fmt.Sprintf("bytes %d-%d/%d", currentOffset, end-1, contentLength))
-		req.Header.Set("User-Agent", "skicka/0.1")
-
-		// Actually (try to) upload the chunk.
-		resp, err := gd.OAuthTransport.RoundTrip(req)
-
-		origCurrentOffset := currentOffset
-		status, err := handleResumableUploadResponse(resp, err,
-			driveFile, contentType, contentLength, &ntries, &currentOffset,
-			&sessionURI)
-
-		if resp != nil {
-			googleapi.CloseBody(resp)
-		}
-		if status == Fail {
-			return err
-		}
-
-		if status == Success {
-			// The entire file has been uploaded successfully.
-			atomic.AddInt64(&stats.UploadBytes, end-currentOffset)
-			atomic.AddInt64(&stats.DriveFilesUpdated, 1)
-			return nil
-		}
-
-		// We only account for the number of actually uploaded
-		// bytes by using the updated version of currentOffset
-		// here. For cases where only a partial chunk is uploaded,
-		// the progress bar may reflect more data being uploaded
-		// than actually was, due to it being updated based on what
-		// has been consumed from the original Reader. This is
-		// probably fine; things get back in sync once we work
-		// through the bits buffered in the SomewhatSeekableReader.
-		atomic.AddInt64(&stats.UploadBytes, currentOffset-origCurrentOffset)
-
-		// Go around again and do the next chunk...
-	}
-
-	// This should perhaps be a panic, as if we are able to upload all
-	// of the data but then the Drive API doesn't give us a 2xx reply
-	// with the last chunk, then something is really broken.
-	return fmt.Errorf("uploaded entire file but didn't get 2xx status on last chunk")
-}
-
-func detectContentType(contentsReader io.Reader) (io.Reader, string, error) {
-	// Grab the start of the contents so that we can try to identify
-	// the content type.
-	contentsHeader := make([]byte, 512)
-	headerLength, err := contentsReader.Read(contentsHeader)
-	if err != nil {
-		if err.Error() == "EOF" {
-			// Empty file; this is fine, and we're done.
-			return nil, "", nil
-		}
-		return nil, "", err
-	}
-	contentType := http.DetectContentType(contentsHeader)
-
-	// Reconstruct a new Reader that returns the same byte stream
-	// as the original one, effectively pasting the bytes we read for
-	// the content-type identification to the start of what remains in
-	// the original io.Reader.
-	contentsReader = io.MultiReader(bytes.NewReader(contentsHeader[:headerLength]),
-		contentsReader)
-
-	return contentsReader, contentType, nil
-}
-
-func prepareUploadPUT(driveFile *drive.File, contentsReader io.Reader,
-	length int64) (*http.Request, error) {
-	params := make(url.Values)
-	params.Set("uploadType", "media")
-
-	urls := fmt.Sprintf("https://www.googleapis.com/upload/drive/v2/files/%s",
-		url.QueryEscape(driveFile.Id))
-	urls += "?" + params.Encode()
-
-	contentsReader, contentType, err := detectContentType(contentsReader)
-	if err != nil {
-		return nil, err
-	}
-
-	req, _ := http.NewRequest("PUT", urls, contentsReader)
-	googleapi.SetOpaque(req.URL)
-	req.ContentLength = length
-	req.Header.Set("Content-Type", contentType)
-	req.Header.Set("User-Agent", "skicka/0.1")
-
-	return req, nil
-}
-
-// Upload the file contents given by the io.Reader to the given *drive.File.
-func uploadFileContents(driveFile *drive.File, contentsReader io.Reader,
-	length int64, currentTry int) error {
-	// Only run the resumable upload path for large files (it
-	// introduces some overhead that isn't worth it for smaller files.)
-	if length > resumableUploadMinSize {
-		return uploadFileContentsResumable(driveFile, contentsReader, length)
-	}
-
-	// Limit upload bandwidth, if requested..
-	if config.Upload.Bytes_per_second_limit > 0 {
-		contentsReader = &RateLimitedReader{R: contentsReader}
-	}
-
-	// Get the PUT request for the upload.
-	req, err := prepareUploadPUT(driveFile, contentsReader, length)
-	if err != nil {
-		return err
-	}
-	if req == nil {
-		// Empty file--we're done.
-		atomic.AddInt64(&stats.DriveFilesUpdated, 1)
-		return nil
-	}
-
-	// And send it off...
-	resp, err := gd.OAuthTransport.RoundTrip(req)
-	if resp != nil {
-		defer googleapi.CloseBody(resp)
-	}
-
-	switch handleHTTPResponse(resp, err, currentTry) {
-	case Success:
-		debug.Printf("Success for %s: code %d", driveFile.Title, resp.StatusCode)
-		atomic.AddInt64(&stats.UploadBytes, length)
-		atomic.AddInt64(&stats.DriveFilesUpdated, 1)
-		return nil
-	case Fail:
-		if err == nil {
-			log.Fatalf("nil err but fail? resp %v", *resp)
-		}
-		return err
-	case Retry:
-		// Otherwise tell the caller to please set up the reader, etc.,
-		// again and retry...
-		if resp != nil {
-			b, _ := ioutil.ReadAll(resp.Body)
-			return RetryHTTPTransmitError{StatusCode: resp.StatusCode,
-				StatusBody: string(b)}
-		}
-		return RetryHTTPTransmitError{StatusCode: 500, StatusBody: err.Error()}
-	default:
-		panic("Unhandled HTTPResult value in switch")
-	}
-}
-
 // There are a number of cases where the Google Drive API returns an error
 // code but where it's possible to recover from the error; examples include
 // 401 errors when the OAuth2 token expires after an hour, or 403/500 errors
@@ -1545,13 +901,15 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 				reader = io.TeeReader(countingReader, pb)
 			}
 
-			err = uploadFileContents(driveFile, reader, length, ntries)
+			err = gd.UploadFileContents(driveFile, reader, length, ntries)
 			if err == nil {
 				// Success!
+				atomic.AddInt64(&stats.DriveFilesUpdated, 1)
+				atomic.AddInt64(&stats.UploadBytes, length)
 				break
 			}
 
-			if re, ok := err.(RetryHTTPTransmitError); ok {
+			if re, ok := err.(gdrive.RetryHTTPTransmitError); ok {
 				debug.Printf("%s: got retry http error--retrying: %s",
 					fileMapping.LocalPath, re.Error())
 				if pb != nil {
@@ -1598,11 +956,6 @@ func syncHierarchyUp(localPath string, driveRoot string,
 			return err
 		}
 	}
-
-	// Kick off a background thread to periodically allow uploading
-	// a bit more data.  This allowance is consumed by the
-	// RateLimitedReader Read() function.
-	launchBandwidthTask(config.Upload.Bytes_per_second_limit)
 
 	fileMappings, err := compileUploadFileTree(localPath, driveRoot, encrypt)
 	checkFatalError(err, "skicka: error getting local filetree: %v")
@@ -1682,7 +1035,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	// help improve bandwidth utilizaiton and seems to make rate limit
 	// errors from the Drive API more frequent...
 	for ; uploadBackIndex >= 0; uploadBackIndex-- {
-		if fileMappings[uploadBackIndex].LocalFileInfo.Size() < resumableUploadMinSize {
+		if fileMappings[uploadBackIndex].LocalFileInfo.Size() < gdrive.ResumableUploadMinSize {
 			break
 		}
 
@@ -2055,7 +1408,7 @@ func downloadDriveFile(writer io.Writer, driveFile *drive.File) error {
 	// Rate-limit the download, if required.
 	var contentsReader io.Reader = driveContentsReader
 	if config.Download.Bytes_per_second_limit > 0 {
-		contentsReader = RateLimitedReader{R: driveContentsReader}
+		contentsReader = gdrive.RateLimitedReader{R: driveContentsReader}
 	}
 
 	encrypted, err := isEncrypted(driveFile)
@@ -2148,7 +1501,8 @@ func syncHierarchyDown(drivePath string, localPath string,
 	// Kick off a background thread to periodically allow uploading
 	// a bit more data.  This allowance is consumed by the
 	// RateLimitedReader Read() function.
-	launchBandwidthTask(config.Download.Bytes_per_second_limit)
+	// TODO FIXME FIXME
+	///	launchBandwidthTask(config.Download.Bytes_per_second_limit)
 
 	// Now do the files. Launch multiple workers to improve performance;
 	// we're more likely to have some workers actively downloading file
@@ -3011,7 +2365,9 @@ func main() {
 	readConfigFile(*configFilename)
 
 	gd, err = gdrive.New(config.Google.ClientId, config.Google.ClientSecret,
-		*cachefile, bool(verbose), bool(debug))
+		*cachefile, config.Upload.Bytes_per_second_limit,
+		config.Download.Bytes_per_second_limit,
+		bool(verbose), bool(debug))
 	if err != nil {
 		printErrorAndExit(fmt.Errorf("skicka: error creating Google Drive "+
 			"client: %v", err))
