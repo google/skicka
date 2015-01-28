@@ -683,44 +683,13 @@ func decryptEncryptionKey() ([]byte, error) {
 ///////////////////////////////////////////////////////////////////////////
 // Google Drive utility functions
 
-// Execute the given query with the Google Drive API, returning an array of
-// files that match the query's conditions. Handles transient HTTP errors and
-// the like.
-func runDriveQuery(query string) []*drive.File {
-	pageToken := ""
-	var result []*drive.File
-	for {
-		q := gd.Svc.Files.List().Q(query)
-		if pageToken != "" {
-			q = q.PageToken(pageToken)
-		}
-
-		for ntries := 0; ; ntries++ {
-			r, err := q.Do()
-			if err == nil {
-				result = append(result, r.Items...)
-				pageToken = r.NextPageToken
-				break
-			} else if err = tryToHandleDriveAPIError(err, ntries); err != nil {
-				log.Fatalf("couldn't run Google Drive query: %v",
-					err)
-			}
-		}
-
-		if pageToken == "" {
-			break
-		}
-	}
-	return result
-}
-
 // http://stackoverflow.com/questions/18578768/403-rate-limit-on-insert-sometimes-succeeds
 // Sometimes when we get a 403 error from Files.Insert().Do(), a file is
 // actually created. Delete the file to be sure we don't have duplicate
 // files with the same name.
 func deleteIncompleteDriveFiles(title string, parentId string) {
 	query := fmt.Sprintf("'%s' in parents and title='%s'", parentId, title)
-	files := runDriveQuery(query)
+	files := gd.RunQuery(query)
 	for _, f := range files {
 		for ntries := 0; ; ntries++ {
 			err := gd.Svc.Files.Delete(f.Id).Do()
@@ -738,7 +707,7 @@ func deleteIncompleteDriveFiles(title string, parentId string) {
 // don't have the various properties we expect. Check for that now
 // and patch things up as needed.
 func createMissingProperties(f *drive.File, mode os.FileMode, encrypt bool) error {
-	if !isFolder(f) {
+	if !gdrive.IsFolder(f) {
 		if encrypt {
 			if _, err := gdrive.GetProperty(f, "IV"); err != nil {
 				// Compute a unique IV for the file.
@@ -843,19 +812,6 @@ func createDriveFolder(title string, mode os.FileMode, modTime time.Time,
 	return f, nil
 }
 
-type fileNotFoundError struct {
-	path        string
-	invokingCmd string
-}
-
-func (err fileNotFoundError) Error() string {
-	msg := ""
-	if err.invokingCmd != "" {
-		msg += fmt.Sprintf("%s: ", err.invokingCmd)
-	}
-	return fmt.Sprintf("%s%s: No such file or directory", msg, err.path)
-}
-
 type removeDirectoryError struct {
 	path        string
 	invokingCmd string
@@ -867,103 +823,6 @@ func (err removeDirectoryError) Error() string {
 		msg += fmt.Sprintf("%s: ", err.invokingCmd)
 	}
 	return fmt.Sprintf("%s%s: is a directory", msg, err.path)
-}
-
-// Returns the *drive.File corresponding to a given path starting from the
-// root of the Google Drive filesystem.  (Note that *drive.File is used to
-// represent both files and folders in Google Drive.)
-func getDriveFile(path string) (*drive.File, error) {
-	parent, err := gd.GetFileById("root")
-	if err != nil {
-		return nil, fmt.Errorf("unable to get Drive root directory: %v", err)
-	}
-
-	dirs := strings.Split(path, "/")
-	// Walk through the directories in the path in turn.
-	for _, dir := range dirs {
-		if dir == "" {
-			// The first string in the split is "" if the
-			// path starts with a '/'.
-			continue
-		}
-
-		query := fmt.Sprintf("title='%s' and '%s' in parents and trashed=false",
-			dir, parent.Id)
-		files := runDriveQuery(query)
-
-		if len(files) == 0 {
-			return nil, fileNotFoundError{
-				path: path,
-			}
-		} else if len(files) > 1 {
-			return nil, fmt.Errorf("%s: multiple files found", path)
-		} else {
-			parent = files[0]
-		}
-	}
-	return parent, nil
-}
-
-// Add all of the the *drive.Files in 'parentFolder' to the provided map from
-// pathnames to *driveFiles. Assumes that 'path' is the path down to
-// 'parentFolder' when constructing pathnames of files. If 'recursive' is true,
-// also includes all files in the full hierarchy under the given folder.
-// Otherwise, only the files directly in the folder are returned.
-func getFolderContents(path string, parentFolder *drive.File, recursive bool,
-	existingFiles map[string]*drive.File) error {
-	query := fmt.Sprintf("trashed=false and '%s' in parents", parentFolder.Id)
-	dirfiles := runDriveQuery(query)
-	for _, f := range dirfiles {
-		filepath := filepath.Clean(path + "/" + f.Title)
-		if _, ok := existingFiles[filepath]; ok == true {
-			// This shouldn't happen in principle, but Drive does
-			// allow multiple files to have the same title. It's not
-			// obvious how to reconcile this with Unix file
-			// semantics, so we just disallow it entirely.
-			return fmt.Errorf("%s: duplicate file found on Google Drive",
-				filepath)
-		}
-		existingFiles[filepath] = f
-		if isFolder(f) && recursive {
-			err := getFolderContents(filepath, f, recursive, existingFiles)
-			if err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// Returns a map from strings to *drive.Files that represents all existing
-// files in Google Drive at the folder identified by 'path'. If 'recursive' is
-// true, directories under the given path are processed recursively.
-// 'includeBase' indicates whether the *drive.File for the given path should
-// be included in the result, and 'mustExist' indicates whether an error
-// should be returned if the given path doesn't exist on Drive.
-func getFilesAtRemotePath(path string, recursive, includeBase,
-	mustExist bool) map[string]*drive.File {
-	existingFiles := make(map[string]*drive.File)
-	file, err := getDriveFile(path)
-	if err != nil {
-		if !mustExist {
-			return existingFiles
-		}
-		printErrorAndExit(fmt.Errorf("skicka: %v", err))
-	}
-
-	if isFolder(file) {
-		err := getFolderContents(path, file, recursive, existingFiles)
-		if err != nil {
-			printErrorAndExit(fmt.Errorf("skicka: %v", err))
-		}
-		if includeBase {
-			existingFiles[path] = file
-		}
-	} else {
-		existingFiles[path] = file
-	}
-	timeDelta("Get file descriptors from Google Drive")
-	return existingFiles
 }
 
 // Returns the initialization vector (for encryption) for the given file.
@@ -1538,10 +1397,6 @@ func tryToHandleDriveAPIError(err error, ntries int) error {
 	return nil
 }
 
-func isFolder(f *drive.File) bool {
-	return f.MimeType == "application/vnd.google-apps.folder"
-}
-
 ///////////////////////////////////////////////////////////////////////////
 // Uploading files and directory hierarchies to Google Drive
 
@@ -1676,7 +1531,7 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 	}
 	parentFile, ok := existingDriveFiles[dirPath]
 	if !ok {
-		parentFile, err = getDriveFile(dirPath)
+		parentFile, err = gd.GetFile(dirPath)
 		if err != nil {
 			// We can't really recover at this point; the
 			// parent folder definitely should have been
@@ -2315,7 +2170,7 @@ func syncHierarchyDown(drivePath string, localPath string,
 
 	// Both drivePath and localPath must be directories, or both must be files.
 	if stat, err := os.Stat(localPath); err == nil && len(filesOnDrive) == 1 &&
-		stat.IsDir() != isFolder(filesOnDrive[driveFilenames[0]]) {
+		stat.IsDir() != gdrive.IsFolder(filesOnDrive[driveFilenames[0]]) {
 		printErrorAndExit(fmt.Errorf("skicka: %s: remote and local must both be directory or both be files",
 			localPath))
 	}
@@ -2330,7 +2185,7 @@ func syncHierarchyDown(drivePath string, localPath string,
 		driveFile := filesOnDrive[driveFilename]
 		filePath := localPath + "/" + driveFilename[len(drivePath):]
 
-		if isFolder(driveFile) {
+		if gdrive.IsFolder(driveFile) {
 			err := syncFolderDown(filePath, driveFilename, driveFile)
 			if err != nil {
 				nDownloadErrors++
@@ -2700,15 +2555,18 @@ func du(args []string) {
 	recursive := true
 	includeBase := false
 	mustExist := true
-	existingFiles := getFilesAtRemotePath(drivePath, recursive, includeBase,
+	existingFiles, err := gd.GetFilesAtRemotePath(drivePath, recursive, includeBase,
 		mustExist)
+	if err != nil {
+		printErrorAndExit(fmt.Errorf("skicka: %v", err))
+	}
 
 	// Accumulate the size in bytes of each folder in the hierarchy
 	folderSize := make(map[string]int64)
 	var dirNames []string
 	totalSize := int64(0)
 	for name, f := range existingFiles {
-		if isFolder(f) {
+		if gdrive.IsFolder(f) {
 			dirNames = append(dirNames, name)
 		} else {
 			totalSize += f.FileSize
@@ -2734,12 +2592,12 @@ func cat(args []string) {
 	}
 	filename := filepath.Clean(args[0])
 
-	file, err := getDriveFile(filename)
+	file, err := gd.GetFile(filename)
 	timeDelta("Get file descriptors from Google Drive")
 	if err != nil {
 		printErrorAndExit(err)
 	}
-	if isFolder(file) {
+	if gdrive.IsFolder(file) {
 		printErrorAndExit(fmt.Errorf("skicka: %s: is a directory", filename))
 	}
 
@@ -2790,7 +2648,7 @@ func mkdir(args []string) {
 		// Get the Drive File file for our current point in the path.
 		query := fmt.Sprintf("title='%s' and '%s' in parents and "+
 			"trashed=false", dir, parent.Id)
-		files := runDriveQuery(query)
+		files := gd.RunQuery(query)
 
 		if len(files) > 1 {
 			printErrorAndExit(fmt.Errorf("skicka: %s: multiple files with "+
@@ -2818,7 +2676,7 @@ func mkdir(args []string) {
 			if index+1 == nDirs && !makeIntermediate {
 				printErrorAndExit(fmt.Errorf("skicka: %s: already exists",
 					pathSoFar))
-			} else if !isFolder(files[0]) {
+			} else if !gdrive.IsFolder(files[0]) {
 				printErrorAndExit(fmt.Errorf("skicka: %s: not a folder",
 					pathSoFar))
 			} else {
@@ -2830,7 +2688,7 @@ func mkdir(args []string) {
 
 func getPermissionsAsString(driveFile *drive.File) (string, error) {
 	var str string
-	if isFolder(driveFile) {
+	if gdrive.IsFolder(driveFile) {
 		str = "d"
 	} else {
 		str = "-"
@@ -2880,7 +2738,7 @@ type RmCommand struct {
 }
 
 func (rmCmd *RmCommand) getDriveFile() (*drive.File, error) {
-	driveFile, err := getDriveFile(rmCmd.path)
+	driveFile, err := gd.GetFile(rmCmd.path)
 	if err == nil {
 		rmCmd.driveFile = driveFile
 	}
@@ -2930,7 +2788,7 @@ func rm(args []string) {
 	}
 
 	if err := checkRmPossible(rmCmd, recursive); err != nil {
-		if _, ok := err.(fileNotFoundError); ok {
+		if _, ok := err.(gdrive.FileNotFoundError); ok {
 			// if there's an encrypted version on drive, let the user know and exit
 			oldPath := rmCmd.path
 			rmCmd.path += encryptionSuffix
@@ -2976,17 +2834,14 @@ func checkRmPossible(queryer driveQueryer, recursive bool) error {
 	driveFile, err := queryer.getDriveFile()
 	if err != nil {
 		switch err.(type) {
-		case fileNotFoundError:
-			return fileNotFoundError{
-				path:        queryer.drivePath(),
-				invokingCmd: invokingCmd,
-			}
+		case gdrive.FileNotFoundError:
+			return gdrive.NewFileNotFoundError(queryer.drivePath(), invokingCmd)
 		default:
 			return err
 		}
 	}
 
-	if !recursive && isFolder(driveFile) {
+	if !recursive && gdrive.IsFolder(driveFile) {
 		return removeDirectoryError{
 			path:        queryer.drivePath(),
 			invokingCmd: invokingCmd,
@@ -3023,8 +2878,11 @@ func ls(args []string) {
 
 	includeBase := false
 	mustExist := true
-	existingFiles := getFilesAtRemotePath(drivePath, recursive, includeBase,
+	existingFiles, err := gd.GetFilesAtRemotePath(drivePath, recursive, includeBase,
 		mustExist)
+	if err != nil {
+		printErrorAndExit(fmt.Errorf("skicka: %v", err))
+	}
 
 	var filenames []string
 	for f := range existingFiles {
@@ -3038,7 +2896,7 @@ func ls(args []string) {
 		if !recursive {
 			printFilename = filepath.Base(f)
 		}
-		if isFolder(file) {
+		if gdrive.IsFolder(file) {
 			printFilename += "/"
 		}
 		if long || longlong {
@@ -3103,12 +2961,15 @@ func upload(args []string) {
 	includeBase := true
 	mustExist := false
 	fmt.Fprintf(os.Stderr, "skicka: Getting list of files to upload... ")
-	existingFiles := getFilesAtRemotePath(drivePath, recursive, includeBase,
+	existingFiles, err := gd.GetFilesAtRemotePath(drivePath, recursive, includeBase,
 		mustExist)
 	fmt.Fprintf(os.Stderr, "Done.\n")
+	if err != nil {
+		printErrorAndExit(fmt.Errorf("skicka: %v", err))
+	}
 
 	syncStartTime = time.Now()
-	err := syncHierarchyUp(localPath, drivePath, existingFiles, encrypt,
+	err = syncHierarchyUp(localPath, drivePath, existingFiles, encrypt,
 		ignoreTimes)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "skicka: error uploading %s: %v\n",
@@ -3144,12 +3005,15 @@ func download(args []string) {
 	includeBase := true
 	mustExist := true
 	fmt.Fprintf(os.Stderr, "skicka: Getting list of files to download... ")
-	existingFiles := getFilesAtRemotePath(drivePath, recursive, includeBase,
+	existingFiles, err := gd.GetFilesAtRemotePath(drivePath, recursive, includeBase,
 		mustExist)
 	fmt.Fprintf(os.Stderr, "Done. Starting download.\n")
+	if err != nil {
+		printErrorAndExit(fmt.Errorf("skicka: %v", err))
+	}
 
 	syncStartTime = time.Now()
-	err := syncHierarchyDown(drivePath, localPath, existingFiles, ignoreTimes)
+	err = syncHierarchyDown(drivePath, localPath, existingFiles, ignoreTimes)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "skicka: error downloading %s: %v\n",
 			localPath, err)
