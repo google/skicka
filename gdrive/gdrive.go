@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"google.golang.org/api/drive/v2"
 	"google.golang.org/api/googleapi"
+	"io"
 	"log"
 	mathrand "math/rand"
 	"net/http"
@@ -302,4 +303,110 @@ func (gd *GDrive) GetFilesAtRemotePath(path string, recursive, includeBase,
 
 func IsFolder(f *drive.File) bool {
 	return f.MimeType == "application/vnd.google-apps.folder"
+}
+
+// Get the contents of the *drive.File as an io.ReadCloser.
+func (gd *GDrive) GetFileContentsReader(driveFile *drive.File) (io.ReadCloser, error) {
+	// The file download URL expires some hours after it's retrieved;
+	// re-grab the file right before downloading it so that we have a
+	// fresh URL.
+	driveFile, err := gd.GetFileById(driveFile.Id)
+	if err != nil {
+		return nil, err
+	}
+
+	url := driveFile.DownloadUrl
+	if url == "" {
+		url = driveFile.ExportLinks[driveFile.MimeType]
+	}
+
+	for ntries := 0; ; ntries++ {
+		request, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		resp, err := gd.OAuthTransport.RoundTrip(request)
+
+		switch gd.handleHTTPResponse(resp, err, ntries) {
+		case Success:
+			return resp.Body, nil
+		case Fail:
+			return nil, err
+		case Retry:
+		}
+	}
+}
+
+type HTTPResponseResult int
+
+const (
+	Success    HTTPResponseResult = iota
+	Retry                         = iota
+	Fail                          = iota
+	RefreshURI                    = iota
+)
+
+const maxHTTPRetries = 6
+
+// We've gotten an *http.Response (maybe) and an error (maybe) back after
+// performing some HTTP operation; this function takes care of figuring
+// out if the operation succeeded, refreshes OAuth2 tokens if expiration
+// was the cause of the failure, takes care of exponential back-off for
+// transient errors, etc.  It then returns a HTTPResponseResult to the
+// caller, indicating how it should proceed.
+func (gd *GDrive) handleHTTPResponse(resp *http.Response, err error, ntries int) HTTPResponseResult {
+	if err == nil && resp != nil && resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+		return Success
+	}
+
+	if ntries == maxHTTPRetries {
+		return Fail
+	}
+
+	if resp != nil && resp.StatusCode == 401 {
+		// After an hour, the OAuth2 token expires and needs to
+		// be refreshed.
+		gd.debug.Printf("Trying OAuth2 token refresh.")
+		if err = gd.OAuthTransport.Refresh(); err == nil {
+			// Success
+			return Retry
+		}
+		// Otherwise fall through to sleep
+	}
+
+	// 403, 500, and 503 error codes come up for transient issues like
+	// hitting the rate limit for Drive SDK API calls, but sometimes we get
+	// other timeouts/connection resets here. Therefore, for all errors, we
+	// sleep (with exponential backoff) and try again a few times before
+	// giving up.
+	gd.exponentialBackoff(ntries, resp, err)
+	return Retry
+}
+
+func (gd *GDrive) UpdateProperty(driveFile *drive.File, name string, newValue string) error {
+	if oldValue, err := GetProperty(driveFile, name); err == nil {
+		if oldValue == newValue {
+			return nil
+		}
+	}
+
+	for nTriesGet := 0; ; nTriesGet++ {
+		prop, err := gd.Svc.Properties.Get(driveFile.Id, name).Do()
+		if err == nil {
+			prop.Value = newValue
+			for nTriesUpdate := 0; ; nTriesUpdate++ {
+				_, err = gd.Svc.Properties.Update(driveFile.Id,
+					name, prop).Do()
+				if err == nil {
+					// success
+					return nil
+				} else if err = gd.tryToHandleDriveAPIError(err, nTriesUpdate); err != nil {
+					return err
+				}
+			}
+		} else if err = gd.tryToHandleDriveAPIError(err, nTriesGet); err != nil {
+			return err
+		}
+	}
 }

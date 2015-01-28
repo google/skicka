@@ -862,35 +862,7 @@ func updateModificationTime(driveFile *drive.File, t time.Time) error {
 func updatePermissions(driveFile *drive.File, mode os.FileMode) error {
 	bits := mode & os.ModePerm
 	bitsString := fmt.Sprintf("%#o", bits)
-	return updateProperty(driveFile, "Permissions", bitsString)
-}
-
-func updateProperty(driveFile *drive.File, name string, newValue string) error {
-	if oldValue, err := gdrive.GetProperty(driveFile, name); err == nil {
-		if oldValue == newValue {
-			return nil
-		}
-	}
-
-	for nTriesGet := 0; ; nTriesGet++ {
-		prop, err := gd.Svc.Properties.Get(driveFile.Id, name).Do()
-		if err == nil {
-			prop.Value = newValue
-			for nTriesUpdate := 0; ; nTriesUpdate++ {
-				_, err = gd.Svc.Properties.Update(driveFile.Id,
-					name, prop).Do()
-				if err == nil {
-					// success
-					return nil
-				} else if err = tryToHandleDriveAPIError(err,
-					nTriesUpdate); err != nil {
-					return err
-				}
-			}
-		} else if err = tryToHandleDriveAPIError(err, nTriesGet); err != nil {
-			return err
-		}
-	}
+	return gd.UpdateProperty(driveFile, "Permissions", bitsString)
 }
 
 func getModificationTime(driveFile *drive.File) (time.Time, error) {
@@ -1323,40 +1295,6 @@ func uploadFileContents(driveFile *drive.File, contentsReader io.Reader,
 		return RetryHTTPTransmitError{StatusCode: 500, StatusBody: err.Error()}
 	default:
 		panic("Unhandled HTTPResult value in switch")
-	}
-}
-
-// Get the contents of the *drive.File as an io.ReadCloser.
-func getDriveFileContentsReader(driveFile *drive.File) (io.ReadCloser, error) {
-	// The file download URL expires some hours after it's retrieved;
-	// re-grab the file right before downloading it so that we have a
-	// fresh URL.
-	driveFile, err := gd.GetFileById(driveFile.Id)
-	if err != nil {
-		return nil, err
-	}
-
-	url := driveFile.DownloadUrl
-
-	if url == "" {
-		url = driveFile.ExportLinks[driveFile.MimeType]
-	}
-
-	for ntries := 0; ; ntries++ {
-		request, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		resp, err := gd.OAuthTransport.RoundTrip(request)
-
-		switch handleHTTPResponse(resp, err, ntries) {
-		case Success:
-			return resp.Body, nil
-		case Fail:
-			return nil, err
-		case Retry:
-		}
 	}
 }
 
@@ -2106,7 +2044,7 @@ func syncFolderDown(localPath string, driveFilename string, driveFile *drive.Fil
 
 // Sync the given file from Google Drive to the local filesystem.
 func downloadDriveFile(writer io.Writer, driveFile *drive.File) error {
-	driveContentsReader, err := getDriveFileContentsReader(driveFile)
+	driveContentsReader, err := gd.GetFileContentsReader(driveFile)
 	if driveContentsReader != nil {
 		defer driveContentsReader.Close()
 	}
@@ -2601,7 +2539,7 @@ func cat(args []string) {
 		printErrorAndExit(fmt.Errorf("skicka: %s: is a directory", filename))
 	}
 
-	contentsReader, err := getDriveFileContentsReader(file)
+	contentsReader, err := gd.GetFileContentsReader(file)
 	if contentsReader != nil {
 		defer contentsReader.Close()
 	}
