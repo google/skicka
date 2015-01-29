@@ -28,30 +28,33 @@ import (
 )
 
 func Cat(args []string) {
-	if len(args) != 1 {
+	if len(args) == 0 {
 		printUsageAndExit()
 	}
-	filename := filepath.Clean(args[0])
 
-	file, err := gd.GetFile(filename)
-	timeDelta("Get file descriptors from Google Drive")
-	if err != nil {
-		printErrorAndExit(err)
-	}
-	if gdrive.IsFolder(file) {
-		printErrorAndExit(fmt.Errorf("skicka: %s: is a directory", filename))
-	}
+	for _, fn := range args {
+		fn := filepath.Clean(fn)
 
-	contentsReader, err := gd.GetFileContents(file)
-	if contentsReader != nil {
-		defer contentsReader.Close()
-	}
-	if err != nil {
-		printErrorAndExit(fmt.Errorf("skicka: %s: %v", filename, err))
-	}
+		file, err := gd.GetFile(fn)
+		if err != nil {
+			printErrorAndExit(err)
+		}
+		if gdrive.IsFolder(file) {
+			printErrorAndExit(fmt.Errorf("skicka: %s: is a directory", fn))
+		}
 
-	_, err = io.Copy(os.Stdout, contentsReader)
-	if err != nil {
-		printErrorAndExit(fmt.Errorf("skicka: %s: %v", filename, err))
+		contentsReader, err := gd.GetFileContents(file)
+		if err != nil {
+			if contentsReader != nil {
+				contentsReader.Close()
+			}
+			printErrorAndExit(fmt.Errorf("skicka: %s: %v", fn, err))
+		}
+
+		_, err = io.Copy(os.Stdout, contentsReader)
+		contentsReader.Close()
+		if err != nil {
+			printErrorAndExit(fmt.Errorf("skicka: %s: %v", fn, err))
+		}
 	}
 }

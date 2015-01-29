@@ -586,7 +586,7 @@ usage: skicka [common options] <command> [command options]
 
 Commands and their options are:
   cat        Print the contents of the Google Drive file to standard output.
-             Arguments: <gdrive path>
+             Arguments: <gdrive path ...>
 
   download   Recursively download all files from a Google Drive folder to a
              local directory. If a local file already exists and has the same
