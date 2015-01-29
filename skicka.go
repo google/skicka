@@ -616,7 +616,7 @@ Commands and their options are:
              specified.
 
   rm	     Remove a file or directory at the given Google Drive path.
-             Arguments: [-r, -s] <drive path>,
+             Arguments: [-r, -s] <drive path ...>,
              where files and directories are recursively removed if -r is specified
              and the google drive trash is skipped if -s is specified. The default 
              behavior is to fail if the drive path specified is a directory and -r is
@@ -715,7 +715,7 @@ func main() {
 	case "download":
 		Download(args)
 	case "rm":
-		Rm(args)
+		rm(args)
 	default:
 		printUsageAndExit()
 	}
