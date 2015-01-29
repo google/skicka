@@ -100,7 +100,10 @@ func syncHierarchyDown(drivePath string, localPath string,
 	// 2) Filter out everything that's not a file that needs to be downloaded
 	for _, driveFilename := range driveFilenames {
 		driveFile := filesOnDrive[driveFilename]
-		filePath := localPath + "/" + driveFilename[len(drivePath):]
+		filePath := localPath
+		if len(drivePath) < len(driveFilename) {
+			filePath += "/" + driveFilename[len(drivePath):]
+		}
 
 		if gdrive.IsFolder(driveFile) {
 			err := syncFolderDown(filePath, driveFilename, driveFile)

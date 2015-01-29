@@ -37,7 +37,7 @@ func (err removeDirectoryError) Error() string {
 	return fmt.Sprintf("%s%s: is a directory", msg, err.path)
 }
 
-var rmSyntaxError CommandSyntaxError = CommandSyntaxError{
+var rmSyntaxError = CommandSyntaxError{
 	Cmd: "rm",
 	Msg: "drive path cannot be empty.\n" +
 		"Usage: rm [-r, -s] drive path",

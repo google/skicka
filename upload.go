@@ -119,19 +119,19 @@ func Upload(args []string) {
 }
 
 // Representation of a local file that may need to be synced up to Drive.
-type LocalToRemoteFileMapping struct {
+type localToRemoteFileMapping struct {
 	LocalPath     string
 	RemotePath    string
 	LocalFileInfo os.FileInfo
 }
 
 // Implement sort.Interface so that we can sort arrays of
-// LocalToRemoteFileMapping by file size.
-type LocalToRemoteBySize []LocalToRemoteFileMapping
+// localToRemoteFileMapping by file size.
+type localToRemoteBySize []localToRemoteFileMapping
 
-func (l2r LocalToRemoteBySize) Len() int      { return len(l2r) }
-func (l2r LocalToRemoteBySize) Swap(i, j int) { l2r[i], l2r[j] = l2r[j], l2r[i] }
-func (l2r LocalToRemoteBySize) Less(i, j int) bool {
+func (l2r localToRemoteBySize) Len() int      { return len(l2r) }
+func (l2r localToRemoteBySize) Swap(i, j int) { l2r[i], l2r[j] = l2r[j], l2r[i] }
+func (l2r localToRemoteBySize) Less(i, j int) bool {
 	return l2r[i].LocalFileInfo.Size() < l2r[j].LocalFileInfo.Size()
 }
 
@@ -233,7 +233,7 @@ func getFileContentsReaderForUpload(path string, encrypt bool,
 // appropriately.
 // Besides being sent up to Google Drive, the file is tee'd (via io.Tee)
 // into an optional writer variable.  This variable can safely be nil.
-func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
+func syncFileUp(fileMapping localToRemoteFileMapping, encrypt bool,
 	existingDriveFiles map[string]*drive.File, pb *pb.ProgressBar) error {
 	debug.Printf("syncFileUp: %#v", fileMapping.LocalFileInfo)
 
@@ -401,7 +401,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 
 	// Given the list of files to sync, first find all of the directories and
 	// then either get or create a Drive folder for each one.
-	directoryMappingMap := make(map[string]LocalToRemoteFileMapping)
+	directoryMappingMap := make(map[string]localToRemoteFileMapping)
 	var directoryNames []string
 	for _, localfile := range fileMappings {
 		if localfile.LocalFileInfo.IsDir() {
@@ -444,7 +444,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	fileProgressBar.Start()
 
 	// Sort the files by size, small to large.
-	sort.Sort(LocalToRemoteBySize(fileMappings))
+	sort.Sort(localToRemoteBySize(fileMappings))
 
 	// The two indices uploadFrontIndex and uploadBackIndex point to the
 	// range of elements in the fileMappings array that haven't yet been
@@ -556,12 +556,12 @@ func syncHierarchyUp(localPath string, driveRoot string,
 		"This is likely a transient failure; try uploading again", nUploadErrors)
 }
 
-func filterFilesToUpload(fileMappings []LocalToRemoteFileMapping,
+func filterFilesToUpload(fileMappings []localToRemoteFileMapping,
 	existingDriveFiles map[string]*drive.File,
-	encrypt, ignoreTimes bool) ([]LocalToRemoteFileMapping, error) {
+	encrypt, ignoreTimes bool) ([]localToRemoteFileMapping, error) {
 
 	// files to be uploaded are kept in this slice
-	var toUpload []LocalToRemoteFileMapping
+	var toUpload []localToRemoteFileMapping
 
 	for _, file := range fileMappings {
 		driveFile, exists := existingDriveFiles[file.RemotePath]
@@ -651,10 +651,10 @@ func filterFilesToUpload(fileMappings []LocalToRemoteFileMapping,
 	return toUpload, nil
 }
 
-func compileUploadFileTree(localPath, driveRoot string, encrypt bool) ([]LocalToRemoteFileMapping, error) {
+func compileUploadFileTree(localPath, driveRoot string, encrypt bool) ([]localToRemoteFileMapping, error) {
 	// Walk the local directory hierarchy starting at 'localPath' and build
 	// an array of files that may need to be synchronized.
-	var fileMappings []LocalToRemoteFileMapping
+	var fileMappings []localToRemoteFileMapping
 
 	walkFuncCallback := func(path string, info os.FileInfo, patherr error) error {
 		path = filepath.Clean(path)
@@ -692,7 +692,7 @@ func compileUploadFileTree(localPath, driveRoot string, encrypt bool) ([]LocalTo
 		if info.IsDir() == false && encrypt == true {
 			drivePath += encryptionSuffix
 		}
-		fileMappings = append(fileMappings, LocalToRemoteFileMapping{path, drivePath, info})
+		fileMappings = append(fileMappings, localToRemoteFileMapping{path, drivePath, info})
 		return nil
 	}
 
