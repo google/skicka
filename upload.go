@@ -1,9 +1,29 @@
+//
+// upload.go
+// Copyright(c)2014-2015 Google, Inc.
+//
+// This file is part of skicka.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
 package main
 
 import (
 	"bytes"
 	"crypto/aes"
 	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"github.com/cheggaaa/pb"
 	"github.com/google/skicka/gdrive"
@@ -17,6 +37,33 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+// fileCloser is kind of a hack: it implements the io.ReadCloser
+// interface, wherein the Read() calls go to R, and the Close() call
+// goes to C.
+type fileCloser struct {
+	R io.Reader
+	C *os.File
+}
+
+func (fc *fileCloser) Read(b []byte) (int, error) {
+	return fc.R.Read(b)
+}
+
+func (fc *fileCloser) Close() error {
+	return fc.C.Close()
+}
+
+type byteCountingReader struct {
+	R         io.Reader
+	bytesRead int
+}
+
+func (bcr *byteCountingReader) Read(dst []byte) (int, error) {
+	read, err := bcr.R.Read(dst)
+	bcr.bytesRead += read
+	return read, err
+}
 
 func Upload(args []string) {
 	ignoreTimes := false
@@ -651,4 +698,76 @@ func compileUploadFileTree(localPath, driveRoot string, encrypt bool) ([]LocalTo
 
 	err := filepath.Walk(localPath, walkFuncCallback)
 	return fileMappings, err
+}
+
+// If we didn't shut down cleanly before, there may be files that
+// don't have the various properties we expect. Check for that now
+// and patch things up as needed.
+func createMissingProperties(f *drive.File, mode os.FileMode, encrypt bool) error {
+	if !gdrive.IsFolder(f) {
+		if encrypt {
+			if _, err := gdrive.GetProperty(f, "IV"); err != nil {
+				// Compute a unique IV for the file.
+				iv := getRandomBytes(aes.BlockSize)
+				ivhex := hex.EncodeToString(iv)
+
+				debug.Printf("Creating IV property for file %s, "+
+					"which doesn't have one.", f.Title)
+				err := gd.AddProperty("IV", ivhex, f)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if _, err := gdrive.GetProperty(f, "Permissions"); err != nil {
+		debug.Printf("Creating Permissions property for file %s, "+
+			"which doesn't have one.", f.Title)
+		err := gd.AddProperty("Permissions", fmt.Sprintf("%#o", mode&os.ModePerm), f)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Create a new *drive.File with the given name inside the folder represented
+// by parentFolder.
+func createDriveFile(filename string, mode os.FileMode, modTime time.Time, encrypt bool,
+	parentFolder *drive.File) (*drive.File, error) {
+	var proplist []*drive.Property
+	if encrypt {
+		// Compute a unique IV for the file.
+		iv := getRandomBytes(aes.BlockSize)
+		ivhex := hex.EncodeToString(iv)
+
+		ivprop := new(drive.Property)
+		ivprop.Key = "IV"
+		ivprop.Value = ivhex
+		proplist = append(proplist, ivprop)
+	}
+	permprop := new(drive.Property)
+	permprop.Key = "Permissions"
+	permprop.Value = fmt.Sprintf("%#o", mode&os.ModePerm)
+	proplist = append(proplist, permprop)
+
+	return gd.InsertNewFile(filename, parentFolder, modTime, proplist)
+}
+
+// Create a *drive.File for the folder with the given title and parent folder.
+func createDriveFolder(title string, mode os.FileMode, modTime time.Time,
+	parentFolder *drive.File) (*drive.File, error) {
+	var proplist []*drive.Property
+	permprop := new(drive.Property)
+	permprop.Key = "Permissions"
+	permprop.Value = fmt.Sprintf("%#o", mode&os.ModePerm)
+	proplist = append(proplist, permprop)
+
+	return gd.InsertNewFolder(title, parentFolder, modTime, proplist)
+}
+
+func updatePermissions(driveFile *drive.File, mode os.FileMode) error {
+	bits := mode & os.ModePerm
+	bitsString := fmt.Sprintf("%#o", bits)
+	return gd.UpdateProperty(driveFile, "Permissions", bitsString)
 }

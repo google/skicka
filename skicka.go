@@ -35,8 +35,6 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
-	mathrand "math/rand"
-	"net/http"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -120,33 +118,6 @@ type CommandSyntaxError struct {
 
 func (c CommandSyntaxError) Error() string {
 	return fmt.Sprintf("%s syntax error: %s", c.Cmd, c.Msg)
-}
-
-// fileCloser is kind of a hack: it implements the io.ReadCloser
-// interface, wherein the Read() calls go to R, and the Close() call
-// goes to C.
-type fileCloser struct {
-	R io.Reader
-	C *os.File
-}
-
-func (fc *fileCloser) Read(b []byte) (int, error) {
-	return fc.R.Read(b)
-}
-
-func (fc *fileCloser) Close() error {
-	return fc.C.Close()
-}
-
-type byteCountingReader struct {
-	R         io.Reader
-	bytesRead int
-}
-
-func (bcr *byteCountingReader) Read(dst []byte) (int, error) {
-	read, err := bcr.R.Read(dst)
-	bcr.bytesRead += read
-	return read, err
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -300,17 +271,6 @@ func printFinalStats() {
 		fmtbytes(maxActiveBytes, false))
 }
 
-func exponentialBackoff(ntries int, resp *http.Response, err error) {
-	s := time.Duration(1<<uint(ntries))*time.Second +
-		time.Duration(mathrand.Int()%1000)*time.Millisecond
-	time.Sleep(s)
-	if resp != nil {
-		debug.Printf("exponential backoff: slept for resp %d...", resp.StatusCode)
-	} else {
-		debug.Printf("exponential backoff: slept for error %v...", err)
-	}
-}
-
 ///////////////////////////////////////////////////////////////////////////
 // Encryption/decryption
 
@@ -452,72 +412,6 @@ func decryptEncryptionKey() ([]byte, error) {
 ///////////////////////////////////////////////////////////////////////////
 // Google Drive utility functions
 
-// If we didn't shut down cleanly before, there may be files that
-// don't have the various properties we expect. Check for that now
-// and patch things up as needed.
-func createMissingProperties(f *drive.File, mode os.FileMode, encrypt bool) error {
-	if !gdrive.IsFolder(f) {
-		if encrypt {
-			if _, err := gdrive.GetProperty(f, "IV"); err != nil {
-				// Compute a unique IV for the file.
-				iv := getRandomBytes(aes.BlockSize)
-				ivhex := hex.EncodeToString(iv)
-
-				debug.Printf("Creating IV property for file %s, "+
-					"which doesn't have one.", f.Title)
-				err := gd.AddProperty("IV", ivhex, f)
-				if err != nil {
-					return err
-				}
-			}
-		}
-	}
-	if _, err := gdrive.GetProperty(f, "Permissions"); err != nil {
-		debug.Printf("Creating Permissions property for file %s, "+
-			"which doesn't have one.", f.Title)
-		err := gd.AddProperty("Permissions", fmt.Sprintf("%#o", mode&os.ModePerm), f)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// Create a new *drive.File with the given name inside the folder represented
-// by parentFolder.
-func createDriveFile(filename string, mode os.FileMode, modTime time.Time, encrypt bool,
-	parentFolder *drive.File) (*drive.File, error) {
-	var proplist []*drive.Property
-	if encrypt {
-		// Compute a unique IV for the file.
-		iv := getRandomBytes(aes.BlockSize)
-		ivhex := hex.EncodeToString(iv)
-
-		ivprop := new(drive.Property)
-		ivprop.Key = "IV"
-		ivprop.Value = ivhex
-		proplist = append(proplist, ivprop)
-	}
-	permprop := new(drive.Property)
-	permprop.Key = "Permissions"
-	permprop.Value = fmt.Sprintf("%#o", mode&os.ModePerm)
-	proplist = append(proplist, permprop)
-
-	return gd.InsertNewFile(filename, parentFolder, modTime, proplist)
-}
-
-// Create a *drive.File for the folder with the given title and parent folder.
-func createDriveFolder(title string, mode os.FileMode, modTime time.Time,
-	parentFolder *drive.File) (*drive.File, error) {
-	var proplist []*drive.Property
-	permprop := new(drive.Property)
-	permprop.Key = "Permissions"
-	permprop.Value = fmt.Sprintf("%#o", mode&os.ModePerm)
-	proplist = append(proplist, permprop)
-
-	return gd.InsertNewFolder(title, parentFolder, modTime, proplist)
-}
-
 // Returns the initialization vector (for encryption) for the given file.
 // We store the initialization vector as a hex-encoded property in the
 // file so that we don't need to download the file's contents to find the
@@ -537,12 +431,6 @@ func getInitializationVector(driveFile *drive.File) ([]byte, error) {
 	return iv, nil
 }
 
-func updatePermissions(driveFile *drive.File, mode os.FileMode) error {
-	bits := mode & os.ModePerm
-	bitsString := fmt.Sprintf("%#o", bits)
-	return gd.UpdateProperty(driveFile, "Permissions", bitsString)
-}
-
 func getPermissions(driveFile *drive.File) (os.FileMode, error) {
 	permStr, err := gdrive.GetProperty(driveFile, "Permissions")
 	if err != nil {
@@ -552,14 +440,15 @@ func getPermissions(driveFile *drive.File) (os.FileMode, error) {
 	return os.FileMode(perm), err
 }
 
+///////////////////////////////////////////////////////////////////////////
+// Error handling
+
 func checkFatalError(err error, message string) {
 	if err != nil {
 		printErrorAndExit(fmt.Errorf(message, err))
 	}
 }
 
-// Download the full hierarchy of files from Google Drive starting at
-// 'drivePath', recreating it at 'localPath'.
 func addErrorAndPrintMessage(totalErrors *int32, message string, err error) {
 	fmt.Fprintf(os.Stderr, message+" Error: %s\n", err)
 	atomic.AddInt32(totalErrors, 1)
