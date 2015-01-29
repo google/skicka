@@ -595,7 +595,7 @@ Commands and their options are:
              Arguments: [-ignore-times] <drive path> <local directory> 
 
   du         Print the space used by the Google Drive folder and its children.
-             Arguments: <drive path>
+             Arguments: <drive path ...>
 
   genkey     Generate a new key for encrypting files.
 
@@ -703,7 +703,7 @@ func main() {
 
 	switch cmd {
 	case "du":
-		Du(args)
+		du(args)
 	case "cat":
 		Cat(args)
 	case "ls":
