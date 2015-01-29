@@ -18,8 +18,6 @@ import (
 	"time"
 )
 
-const ResumableUploadMinSize = 64 * 1024 * 1024
-
 const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
 
 ///////////////////////////////////////////////////////////////////////////
@@ -68,7 +66,7 @@ func (r RetryHTTPTransmitError) Error() string {
 
 // Maximum number of bytes of data that we are currently allowed to
 // upload or download given the bandwidth limits set by the user, if any.
-// This value is reduced by the RateLimitedReader.Read() method when data is
+// This value is reduced by the rateLimitedReader.Read() method when data is
 // uploaded or downloaded, and is periodically increased by the task
 // launched by launchBandwidthTask().
 var bandwidthBudget int
@@ -85,6 +83,7 @@ func launchBandwidthTask(bytesPerSecond int) {
 
 	bandwidthBudgetMutex.Lock()
 	if bandwidthTaskRunning {
+		bandwidthBudget = bytesPerSecond
 		bandwidthBudgetMutex.Unlock()
 		return
 	}
@@ -111,16 +110,17 @@ func launchBandwidthTask(bytesPerSecond int) {
 	}()
 }
 
-// RateLimitedReader is an io.Reader implementation that returns no more bytes
+// rateLimitedReader is an io.Reader implementation that returns no more bytes
 // than the current value of bandwidthBudget.  Thus, as long as the upload and
 // download paths wrap the underlying io.Readers for local files and GETs
 // from Drive (respectively), then we should stay under the bandwidth per
 // second limit.
-type RateLimitedReader struct {
+type rateLimitedReader struct {
 	R io.Reader
+	C io.Closer
 }
 
-func (lr RateLimitedReader) Read(dst []byte) (int, error) {
+func (lr rateLimitedReader) Read(dst []byte) (int, error) {
 	// Loop until some amount of bandwidth is available.
 	for {
 		bandwidthBudgetMutex.Lock()
@@ -165,6 +165,13 @@ func (lr RateLimitedReader) Read(dst []byte) (int, error) {
 	}
 
 	return read, err
+}
+
+func (lr rateLimitedReader) Close() error {
+	if lr.C != nil {
+		return lr.C.Close()
+	}
+	return nil
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -541,6 +548,11 @@ func (gd *GDrive) GetFileContentsReader(driveFile *drive.File) (io.ReadCloser, e
 
 		switch gd.handleHTTPResponse(resp, err, ntries) {
 		case Success:
+			// Rate-limit the download, if required.
+			if gd.download_bytes_per_second > 0 {
+				launchBandwidthTask(gd.download_bytes_per_second)
+				return rateLimitedReader{R: resp.Body, C: resp.Body}, nil
+			}
 			return resp.Body, nil
 		case Fail:
 			return nil, err
@@ -627,18 +639,12 @@ func (gd *GDrive) UploadFileContents(driveFile *drive.File, contentsReader io.Re
 	length int64, currentTry int) error {
 	// Kick off a background thread to periodically allow uploading
 	// a bit more data.  This allowance is consumed by the
-	// RateLimitedReader Read() function.
+	// rateLimitedReader Read() function.
 	launchBandwidthTask(gd.upload_bytes_per_second)
-
-	// Only run the resumable upload path for large files (it
-	// introduces some overhead that isn't worth it for smaller files.)
-	if length > ResumableUploadMinSize {
-		return gd.uploadFileContentsResumable(driveFile, contentsReader, length)
-	}
 
 	// Limit upload bandwidth, if requested..
 	if gd.upload_bytes_per_second > 0 {
-		contentsReader = &RateLimitedReader{R: contentsReader}
+		contentsReader = &rateLimitedReader{R: contentsReader}
 	}
 
 	// Get the PUT request for the upload.
@@ -940,8 +946,8 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error, 
 	}
 }
 
-func (gd *GDrive) uploadFileContentsResumable(driveFile *drive.File, contentsReader io.Reader,
-	contentLength int64) error {
+func (gd *GDrive) UploadFileContentsResumable(driveFile *drive.File,
+	contentsReader io.Reader, contentLength int64) error {
 	contentsReader, contentType, err := detectContentType(contentsReader)
 	if err != nil {
 		return err
@@ -952,6 +958,11 @@ func (gd *GDrive) uploadFileContentsResumable(driveFile *drive.File, contentsRea
 	if err != nil {
 		return err
 	}
+
+	// Kick off a background thread to periodically allow uploading
+	// a bit more data.  This allowance is consumed by the
+	// rateLimitedReader Read() function.
+	launchBandwidthTask(gd.upload_bytes_per_second)
 
 	// TODO: what is a reasonable default here? Must be 256kB minimum.
 	chunkSize := 1024 * 1024
@@ -983,7 +994,7 @@ func (gd *GDrive) uploadFileContentsResumable(driveFile *drive.File, contentsRea
 			N: end - currentOffset,
 		}
 		if gd.upload_bytes_per_second > 0 {
-			body = &RateLimitedReader{R: body}
+			body = &rateLimitedReader{R: body}
 		}
 
 		all, err := ioutil.ReadAll(body)

@@ -54,6 +54,7 @@ import (
 
 const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
 const encryptionSuffix = ".aes256"
+const ResumableUploadMinSize = 64 * 1024 * 1024
 
 ///////////////////////////////////////////////////////////////////////////
 // Global Variables
@@ -125,28 +126,28 @@ func (c CommandSyntaxError) Error() string {
 	return fmt.Sprintf("%s syntax error: %s", c.Cmd, c.Msg)
 }
 
-// FileCloser is kind of a hack: it implements the io.ReadCloser
+// fileCloser is kind of a hack: it implements the io.ReadCloser
 // interface, wherein the Read() calls go to R, and the Close() call
 // goes to C.
-type FileCloser struct {
+type fileCloser struct {
 	R io.Reader
 	C *os.File
 }
 
-func (fc *FileCloser) Read(b []byte) (int, error) {
+func (fc *fileCloser) Read(b []byte) (int, error) {
 	return fc.R.Read(b)
 }
 
-func (fc *FileCloser) Close() error {
+func (fc *fileCloser) Close() error {
 	return fc.C.Close()
 }
 
-type ByteCountingReader struct {
+type byteCountingReader struct {
 	R         io.Reader
 	bytesRead int
 }
 
-func (bcr *ByteCountingReader) Read(dst []byte) (int, error) {
+func (bcr *byteCountingReader) Read(dst []byte) (int, error) {
 	read, err := bcr.R.Read(dst)
 	bcr.bytesRead += read
 	return read, err
@@ -674,7 +675,7 @@ func getFileContentsReaderForUpload(path string, encrypt bool,
 		// Prepend the initialization vector to the returned bytes.
 		r = io.MultiReader(bytes.NewReader(iv[:aes.BlockSize]), r)
 
-		return &FileCloser{R: r, C: f}, fileSize + aes.BlockSize, nil
+		return &fileCloser{R: r, C: f}, fileSize + aes.BlockSize, nil
 	}
 	return f, fileSize, nil
 }
@@ -759,7 +760,7 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 
 		for ntries := 0; ntries < 5; ntries++ {
 			var reader io.Reader
-			var countingReader *ByteCountingReader
+			var countingReader *byteCountingReader
 
 			contentsReader, length, err :=
 				getFileContentsReaderForUpload(fileMapping.LocalPath, encrypt, iv)
@@ -772,13 +773,18 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 			reader = contentsReader
 
 			if pb != nil {
-				countingReader = &ByteCountingReader{
+				countingReader = &byteCountingReader{
 					R: reader,
 				}
 				reader = io.TeeReader(countingReader, pb)
 			}
 
-			err = gd.UploadFileContents(driveFile, reader, length, ntries)
+			if length >= ResumableUploadMinSize {
+				err = gd.UploadFileContentsResumable(driveFile, reader, length)
+			} else {
+				err = gd.UploadFileContents(driveFile, reader, length, ntries)
+			}
+
 			if err == nil {
 				// Success!
 				atomic.AddInt64(&stats.DriveFilesUpdated, 1)
@@ -912,7 +918,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	// help improve bandwidth utilizaiton and seems to make rate limit
 	// errors from the Drive API more frequent...
 	for ; uploadBackIndex >= 0; uploadBackIndex-- {
-		if fileMappings[uploadBackIndex].LocalFileInfo.Size() < gdrive.ResumableUploadMinSize {
+		if fileMappings[uploadBackIndex].LocalFileInfo.Size() < ResumableUploadMinSize {
 			break
 		}
 
@@ -1274,24 +1280,22 @@ func syncFolderDown(localPath string, driveFilename string, driveFile *drive.Fil
 
 // Sync the given file from Google Drive to the local filesystem.
 func downloadDriveFile(writer io.Writer, driveFile *drive.File) error {
-	driveContentsReader, err := gd.GetFileContentsReader(driveFile)
-	if driveContentsReader != nil {
-		defer driveContentsReader.Close()
+	contentsReader, err := gd.GetFileContentsReader(driveFile)
+	if contentsReader != nil {
+		defer contentsReader.Close()
 	}
 	if err != nil {
 		return err
-	}
-
-	// Rate-limit the download, if required.
-	var contentsReader io.Reader = driveContentsReader
-	if config.Download.Bytes_per_second_limit > 0 {
-		contentsReader = gdrive.RateLimitedReader{R: driveContentsReader}
 	}
 
 	encrypted, err := isEncrypted(driveFile)
 	if err != nil {
 		return err
 	}
+
+	var r io.Reader
+	r = contentsReader
+
 	// Decrypt the contents, if they're encrypted.
 	if encrypted {
 		if key == nil {
@@ -1312,10 +1316,10 @@ func downloadDriveFile(writer io.Writer, driveFile *drive.File) error {
 		}
 		// TODO: we should probably double check that the IV
 		// matches the one in the Drive metadata and fail hard if not...
-		contentsReader = makeDecryptionReader(key, iv, contentsReader)
+		r = makeDecryptionReader(key, iv, r)
 	}
 
-	contentsLength, err := io.Copy(writer, contentsReader)
+	contentsLength, err := io.Copy(writer, r)
 	if err != nil {
 		return err
 	}
@@ -1374,12 +1378,6 @@ func syncHierarchyDown(drivePath string, localPath string,
 			}
 		}
 	}
-
-	// Kick off a background thread to periodically allow uploading
-	// a bit more data.  This allowance is consumed by the
-	// RateLimitedReader Read() function.
-	// TODO FIXME FIXME
-	///	launchBandwidthTask(config.Download.Bytes_per_second_limit)
 
 	// Now do the files. Launch multiple workers to improve performance;
 	// we're more likely to have some workers actively downloading file
