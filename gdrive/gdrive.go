@@ -20,6 +20,8 @@ import (
 
 const ResumableUploadMinSize = 64 * 1024 * 1024
 
+const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
+
 ///////////////////////////////////////////////////////////////////////////
 
 type debugging bool
@@ -1024,4 +1026,85 @@ func (gd *GDrive) uploadFileContentsResumable(driveFile *drive.File, contentsRea
 	// of the data but then the Drive API doesn't give us a 2xx reply
 	// with the last chunk, then something is really broken.
 	return fmt.Errorf("uploaded entire file but didn't get 2xx status on last chunk")
+}
+
+func (gd *GDrive) UpdateModificationTime(driveFile *drive.File, t time.Time) error {
+	gd.debug.Printf("updating modification time of %s to %v", driveFile.Title, t)
+
+	for ntries := 0; ; ntries++ {
+		f := &drive.File{ModifiedDate: t.UTC().Format(timeFormat)}
+		_, err := gd.Svc.Files.Patch(driveFile.Id, f).SetModifiedDate(true).Do()
+		if err == nil {
+			gd.debug.Printf("success: updated modification time on %s", driveFile.Title)
+			return nil
+		} else if err = gd.tryToHandleDriveAPIError(err, ntries); err != nil {
+			return err
+		}
+	}
+}
+
+// http://stackoverflow.com/questions/18578768/403-rate-limit-on-insert-sometimes-succeeds
+// Sometimes when we get a 403 error from Files.Insert().Do(), a file is
+// actually created. Delete the file to be sure we don't have duplicate
+// files with the same name.
+func (gd *GDrive) deleteIncompleteDriveFiles(title string, parentId string) {
+	query := fmt.Sprintf("'%s' in parents and title='%s'", parentId, title)
+	files := gd.RunQuery(query)
+	for _, f := range files {
+		for ntries := 0; ; ntries++ {
+			err := gd.Svc.Files.Delete(f.Id).Do()
+			if err == nil {
+				return
+			} else if err = gd.tryToHandleDriveAPIError(err, ntries); err != nil {
+				log.Fatalf("error deleting 403 Google Drive file "+
+					"for %s (ID %s): %v", title, f.Id, err)
+			}
+		}
+	}
+}
+
+// Given an initialized *drive.File structure, create an actual file in Google
+// Drive. The returned a *drive.File represents the file in Drive.
+func (gd *GDrive) InsertNewFile(filename string, parent *drive.File,
+	modTime time.Time, proplist []*drive.Property) (*drive.File, error) {
+	folderParent := &drive.ParentReference{Id: parent.Id}
+	f := &drive.File{
+		Title:        filepath.Base(filename),
+		MimeType:     "application/octet-stream",
+		Parents:      []*drive.ParentReference{folderParent},
+		ModifiedDate: modTime.UTC().Format(timeFormat),
+		Properties:   proplist,
+	}
+	return gd.insertFile(f)
+}
+
+func (gd *GDrive) InsertNewFolder(filename string, parent *drive.File,
+	modTime time.Time, proplist []*drive.Property) (*drive.File, error) {
+	parentref := &drive.ParentReference{Id: parent.Id}
+	f := &drive.File{
+		Title:        filename,
+		MimeType:     "application/vnd.google-apps.folder",
+		ModifiedDate: modTime.UTC().Format(timeFormat),
+		Parents:      []*drive.ParentReference{parentref},
+		Properties:   proplist,
+	}
+	return gd.insertFile(f)
+}
+
+func (gd *GDrive) insertFile(f *drive.File) (*drive.File, error) {
+	for ntries := 0; ; ntries++ {
+		r, err := gd.Svc.Files.Insert(f).Do()
+		if err == nil {
+			gd.debug.Printf("Created new Google Drive file for %s: ID=%s",
+				f.Title, r.Id)
+			return r, nil
+		}
+		gd.debug.Printf("Error %v trying to create drive file for %s. "+
+			"Deleting detrius...", err, f.Title)
+		gd.deleteIncompleteDriveFiles(f.Title, f.Parents[0].Id)
+		err = gd.tryToHandleDriveAPIError(err, ntries)
+		if err != nil {
+			return nil, fmt.Errorf("unable to create drive.File: %v", err)
+		}
+	}
 }

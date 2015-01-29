@@ -456,26 +456,6 @@ func decryptEncryptionKey() ([]byte, error) {
 ///////////////////////////////////////////////////////////////////////////
 // Google Drive utility functions
 
-// http://stackoverflow.com/questions/18578768/403-rate-limit-on-insert-sometimes-succeeds
-// Sometimes when we get a 403 error from Files.Insert().Do(), a file is
-// actually created. Delete the file to be sure we don't have duplicate
-// files with the same name.
-func deleteIncompleteDriveFiles(title string, parentId string) {
-	query := fmt.Sprintf("'%s' in parents and title='%s'", parentId, title)
-	files := gd.RunQuery(query)
-	for _, f := range files {
-		for ntries := 0; ; ntries++ {
-			err := gd.Svc.Files.Delete(f.Id).Do()
-			if err == nil {
-				return
-			} else if err = tryToHandleDriveAPIError(err, ntries); err != nil {
-				log.Fatalf("error deleting 403 Google Drive file "+
-					"for %s (ID %s): %v", title, f.Id, err)
-			}
-		}
-	}
-}
-
 // If we didn't shut down cleanly before, there may be files that
 // don't have the various properties we expect. Check for that now
 // and patch things up as needed.
@@ -507,26 +487,6 @@ func createMissingProperties(f *drive.File, mode os.FileMode, encrypt bool) erro
 	return nil
 }
 
-// Given an initialized *drive.File structure, create an actual file in Google
-// Drive. The returned a *drive.File represents the file in Drive.
-func insertNewDriveFile(f *drive.File) (*drive.File, error) {
-	for ntries := 0; ; ntries++ {
-		r, err := gd.Svc.Files.Insert(f).Do()
-		if err == nil {
-			debug.Printf("Created new Google Drive file for %s: ID=%s",
-				f.Title, r.Id)
-			return r, nil
-		}
-		debug.Printf("Error %v trying to create drive file for %s. "+
-			"Deleting detrius...", err, f.Title)
-		deleteIncompleteDriveFiles(f.Title, f.Parents[0].Id)
-		err = tryToHandleDriveAPIError(err, ntries)
-		if err != nil {
-			return nil, fmt.Errorf("unable to create drive.File: %v", err)
-		}
-	}
-}
-
 // Create a new *drive.File with the given name inside the folder represented
 // by parentFolder.
 func createDriveFile(filename string, mode os.FileMode, modTime time.Time, encrypt bool,
@@ -547,17 +507,7 @@ func createDriveFile(filename string, mode os.FileMode, modTime time.Time, encry
 	permprop.Value = fmt.Sprintf("%#o", mode&os.ModePerm)
 	proplist = append(proplist, permprop)
 
-	folderParent := &drive.ParentReference{Id: parentFolder.Id}
-	f := &drive.File{
-		Title:        filepath.Base(filename),
-		MimeType:     "application/octet-stream",
-		Parents:      []*drive.ParentReference{folderParent},
-		ModifiedDate: modTime.UTC().Format(timeFormat),
-		Properties:   proplist,
-	}
-	debug.Printf("inserting %#v", f)
-
-	return insertNewDriveFile(f)
+	return gd.InsertNewFile(filename, parentFolder, modTime, proplist)
 }
 
 // Create a *drive.File for the folder with the given title and parent folder.
@@ -569,20 +519,7 @@ func createDriveFolder(title string, mode os.FileMode, modTime time.Time,
 	permprop.Value = fmt.Sprintf("%#o", mode&os.ModePerm)
 	proplist = append(proplist, permprop)
 
-	parentref := &drive.ParentReference{Id: parentFolder.Id}
-	f := &drive.File{
-		Title:        title,
-		MimeType:     "application/vnd.google-apps.folder",
-		ModifiedDate: modTime.UTC().Format(timeFormat),
-		Parents:      []*drive.ParentReference{parentref},
-		Properties:   proplist,
-	}
-
-	f, err := insertNewDriveFile(f)
-	if err != nil {
-		return nil, err
-	}
-	return f, nil
+	return gd.InsertNewFolder(title, parentFolder, modTime, proplist)
 }
 
 type removeDirectoryError struct {
@@ -615,21 +552,6 @@ func getInitializationVector(driveFile *drive.File) ([]byte, error) {
 		return nil, fmt.Errorf("unexpected length of IV %d", len(iv))
 	}
 	return iv, nil
-}
-
-func updateModificationTime(driveFile *drive.File, t time.Time) error {
-	debug.Printf("updating modification time of %s to %v", driveFile.Title, t)
-
-	for ntries := 0; ; ntries++ {
-		f := &drive.File{ModifiedDate: t.UTC().Format(timeFormat)}
-		_, err := gd.Svc.Files.Patch(driveFile.Id, f).SetModifiedDate(true).Do()
-		if err == nil {
-			debug.Printf("success: updated modification time on %s", driveFile.Title)
-			return nil
-		} else if err = tryToHandleDriveAPIError(err, ntries); err != nil {
-			return err
-		}
-	}
 }
 
 func updatePermissions(driveFile *drive.File, mode os.FileMode) error {
@@ -934,7 +856,7 @@ func syncFileUp(fileMapping LocalToRemoteFileMapping, encrypt bool,
 
 	verbose.Printf("Updated local %s -> Google Drive %s", fileMapping.LocalPath,
 		fileMapping.RemotePath)
-	return updateModificationTime(driveFile, fileMapping.LocalFileInfo.ModTime())
+	return gd.UpdateModificationTime(driveFile, fileMapping.LocalFileInfo.ModTime())
 }
 
 func checkFatalError(err error, message string) {
@@ -1167,7 +1089,7 @@ func filterFilesToUpload(fileMappings []LocalToRemoteFileMapping,
 					return nil, err
 				}
 				if !t.Equal(file.LocalFileInfo.ModTime()) {
-					if err := updateModificationTime(driveFile, file.LocalFileInfo.ModTime()); err != nil {
+					if err := gd.UpdateModificationTime(driveFile, file.LocalFileInfo.ModTime()); err != nil {
 						return nil, err
 					}
 				}
@@ -1204,7 +1126,7 @@ func filterFilesToUpload(fileMappings []LocalToRemoteFileMapping,
 				// modified time on Drive so that we don't keep checking this
 				// file.
 				debug.Printf("contents match, timestamps do not")
-				if err := updateModificationTime(driveFile, file.LocalFileInfo.ModTime()); err != nil {
+				if err := gd.UpdateModificationTime(driveFile, file.LocalFileInfo.ModTime()); err != nil {
 					return nil, err
 				}
 			} else if metadataMatches == true {
