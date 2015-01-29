@@ -604,7 +604,7 @@ Commands and their options are:
              configuration file for details.)
 
   ls         List the files and directories in the given Google Drive folder.
-             Arguments: [-l, -ll, -r] [drive path],
+             Arguments: [-l, -ll, -r] <drive path ...>,
              where -l and -ll specify long (including sizes and update times)
              and really long output (also including MD5 checksums), respectively.
              The -r argument causes ls to recursively list all files in the
@@ -707,7 +707,7 @@ func main() {
 	case "cat":
 		Cat(args)
 	case "ls":
-		Ls(args)
+		ls(args)
 	case "mkdir":
 		Mkdir(args)
 	case "upload":
