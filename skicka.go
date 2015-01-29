@@ -34,7 +34,6 @@ import (
 	"github.com/cheggaaa/pb"
 	"github.com/google/skicka/gdrive"
 	"google.golang.org/api/drive/v2"
-	"google.golang.org/api/googleapi"
 	"io"
 	"io/ioutil"
 	"log"
@@ -560,13 +559,6 @@ func updatePermissions(driveFile *drive.File, mode os.FileMode) error {
 	return gd.UpdateProperty(driveFile, "Permissions", bitsString)
 }
 
-func getModificationTime(driveFile *drive.File) (time.Time, error) {
-	if driveFile.ModifiedDate != "" {
-		return time.Parse(time.RFC3339Nano, driveFile.ModifiedDate)
-	}
-	return time.Unix(0, 0), nil
-}
-
 func getPermissions(driveFile *drive.File) (os.FileMode, error) {
 	permStr, err := gdrive.GetProperty(driveFile, "Permissions")
 	if err != nil {
@@ -574,43 +566,6 @@ func getPermissions(driveFile *drive.File) (os.FileMode, error) {
 	}
 	perm, err := strconv.ParseInt(permStr, 8, 16)
 	return os.FileMode(perm), err
-}
-
-// There are a number of cases where the Google Drive API returns an error
-// code but where it's possible to recover from the error; examples include
-// 401 errors when the OAuth2 token expires after an hour, or 403/500 errors
-// when we make too many API calls too quickly and we get a rate limit error.
-// This function takes an error returned by a Drive API call and the number
-// of times that we've tried to call the API entrypoint already and does
-// its best to handle the error.
-//
-// If it thinks it may have been successful, it returns nil, and the caller
-// should try the call again. For unrecoverable errors (or too many errors
-// in a row), it returns the error code back and the caller should stop trying.
-func tryToHandleDriveAPIError(err error, ntries int) error {
-	debug.Printf("tryToHandleDriveAPIError: ntries %d error %T %+v",
-		ntries, err, err)
-
-	maxAPIRetries := 6
-	if ntries == maxAPIRetries {
-		return err
-	}
-	switch err := err.(type) {
-	case *googleapi.Error:
-		if err.Code == 401 {
-			// After an hour, the OAuth2 token expires and needs to
-			// be refreshed.
-			debug.Printf("Trying OAuth2 token refresh.")
-			if err := gd.OAuthTransport.Refresh(); err == nil {
-				// Success
-				return nil
-			}
-			// Otherwise fall through to sleep/backoff...
-		}
-	}
-
-	exponentialBackoff(ntries, nil, err)
-	return nil
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -653,7 +608,7 @@ func fileMetadataMatches(info os.FileInfo, encrypt bool,
 		return false, nil
 	}
 
-	driveTime, err := getModificationTime(driveFile)
+	driveTime, err := gdrive.GetModificationTime(driveFile)
 	if err != nil {
 		return true, err
 	}
@@ -1084,7 +1039,7 @@ func filterFilesToUpload(fileMappings []LocalToRemoteFileMapping,
 			if file.LocalFileInfo.IsDir() {
 				// If it's a directory, once it's created and the permissions and times
 				// are updated (if needed), we're all done.
-				t, err := getModificationTime(driveFile)
+				t, err := gdrive.GetModificationTime(driveFile)
 				if err != nil {
 					return nil, err
 				}
@@ -1253,7 +1208,7 @@ func fileNeedsDownload(localPath string, drivePath string, driveFile *drive.File
 		return true, nil
 	}
 
-	driveModificationTime, err := getModificationTime(driveFile)
+	driveModificationTime, err := gdrive.GetModificationTime(driveFile)
 	if err != nil {
 		debug.Printf("unable to get modification time for %s: %v", drivePath, err)
 		return true, nil
@@ -1553,7 +1508,7 @@ func createFileWriteCloser(localPath string, driveFile *drive.File) (io.WriteClo
 	// Set the last access and modification time of the newly-created
 	// file to match the modification time of the original file that was
 	// uploaded to Google Drive.
-	if modifiedTime, err := getModificationTime(driveFile); err == nil {
+	if modifiedTime, err := gdrive.GetModificationTime(driveFile); err == nil {
 		return f, os.Chtimes(localPath, modifiedTime, modifiedTime)
 	}
 	return f, err
@@ -1562,7 +1517,7 @@ func createFileWriteCloser(localPath string, driveFile *drive.File) (io.WriteClo
 func updateLocalFileProperties(filepath string, file *drive.File) error {
 	// make sure that the local permissions and modification
 	// time match the corresponding values stored in Drive.
-	modifiedTime, err := getModificationTime(file)
+	modifiedTime, err := gdrive.GetModificationTime(file)
 	if err != nil {
 		return err
 	}
@@ -1930,53 +1885,6 @@ var rmSyntaxError CommandSyntaxError = CommandSyntaxError{
 		"Usage: rm [-r, -s] drive path",
 }
 
-type driveQueryer interface {
-	getDriveFile() (*drive.File, error)
-	drivePath() string
-}
-
-type driveDeleter interface {
-	deleteDriveFile() error
-	trashDriveFile() (*drive.File, error)
-	isSkipTrash() bool
-}
-
-type RmCommand struct {
-	recursive     bool
-	skipTrash     bool
-	path          string
-	svc           *drive.Service
-	queryService  driveQueryer
-	deleteService driveDeleter
-	driveFile     *drive.File
-}
-
-func (rmCmd *RmCommand) getDriveFile() (*drive.File, error) {
-	driveFile, err := gd.GetFile(rmCmd.path)
-	if err == nil {
-		rmCmd.driveFile = driveFile
-	}
-	return driveFile, err
-}
-
-func (rmCmd *RmCommand) deleteDriveFile() error {
-	debug.Printf("Deleting file %s (id %s)", rmCmd.path, rmCmd.driveFile.Id)
-	return rmCmd.svc.Files.Delete(rmCmd.driveFile.Id).Do()
-}
-
-func (rmCmd *RmCommand) trashDriveFile() (*drive.File, error) {
-	debug.Printf("Trashing file %s (id %s)", rmCmd.path, rmCmd.driveFile.Id)
-	return rmCmd.svc.Files.Trash(rmCmd.driveFile.Id).Do()
-}
-
-func (rmCmd *RmCommand) drivePath() string {
-	return rmCmd.path
-}
-
-func (rmCmd *RmCommand) isSkipTrash() bool {
-	return rmCmd.skipTrash
-}
-
 func rm(args []string) {
 	recursive, skipTrash := false, false
 	var drivePath string
@@ -1994,62 +1902,45 @@ func rm(args []string) {
 		}
 	}
 
-	rmCmd := &RmCommand{
-		recursive: recursive,
-		skipTrash: skipTrash,
-		path:      drivePath,
-		svc:       gd.Svc,
-	}
+	printErrorAndExit(rmSyntaxError)
 
-	if err := checkRmPossible(rmCmd, recursive); err != nil {
+	if err := checkRmPossible(drivePath, recursive); err != nil {
 		if _, ok := err.(gdrive.FileNotFoundError); ok {
 			// if there's an encrypted version on drive, let the user know and exit
-			oldPath := rmCmd.path
-			rmCmd.path += encryptionSuffix
-			if err := checkRmPossible(rmCmd, recursive); err == nil {
+			oldPath := drivePath
+			drivePath += encryptionSuffix
+			if err := checkRmPossible(drivePath, recursive); err == nil {
 				printErrorAndExit(fmt.Errorf("skicka rm: Found no file with path %s, but found encrypted version with path %s.\n"+
 					"If you would like to rm the encrypted version, re-run the command adding the %s extension onto the path.",
-					oldPath, rmCmd.path, encryptionSuffix))
+					oldPath, drivePath, encryptionSuffix))
 			}
 		}
 		printErrorAndExit(err)
 	}
 
-	for nTries := 5; ; nTries++ {
-		err := deleteDriveFile(rmCmd)
-		if err == nil {
-			return
-		}
-		if err = tryToHandleDriveAPIError(err, nTries); err != nil {
-			printErrorAndExit(err)
-		}
+	f, err := gd.GetFile(drivePath)
+	if err != nil {
+		printErrorAndExit(err)
 	}
-}
 
-func deleteDriveFile(deleter driveDeleter) error {
-	skipTrash := deleter.isSkipTrash()
 	if skipTrash {
-		// do delete
-		return deleter.deleteDriveFile()
+		err = gd.DeleteFile(f)
 	} else {
-		// do trash
-		_, err := deleter.trashDriveFile()
-		return err
+		err = gd.TrashFile(f)
+	}
+	if err != nil {
+		printErrorAndExit(err)
 	}
 }
 
-func checkRmPossible(queryer driveQueryer, recursive bool) error {
-	if queryer.drivePath() == "" {
-		return rmSyntaxError
-	}
-
+func checkRmPossible(path string, recursive bool) error {
 	invokingCmd := "skicka rm"
 
-	driveFile, err := queryer.getDriveFile()
+	driveFile, err := gd.GetFile(path)
 	if err != nil {
 		switch err.(type) {
 		case gdrive.FileNotFoundError:
-			return gdrive.NewFileNotFoundError(queryer.drivePath(), invokingCmd)
+			return gdrive.NewFileNotFoundError(path, invokingCmd)
 		default:
 			return err
 		}
@@ -2057,7 +1948,7 @@ func checkRmPossible(queryer driveQueryer, recursive bool) error {
 
 	if !recursive && gdrive.IsFolder(driveFile) {
 		return removeDirectoryError{
-			path:        queryer.drivePath(),
+			path:        path,
 			invokingCmd: invokingCmd,
 		}
 	}
@@ -2114,7 +2005,7 @@ func ls(args []string) {
 			printFilename += "/"
 		}
 		if long || longlong {
-			synctime, _ := getModificationTime(file)
+			synctime, _ := gdrive.GetModificationTime(file)
 			permString, _ := getPermissionsAsString(file)
 			if longlong {
 				md5 := file.Md5Checksum

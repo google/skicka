@@ -245,8 +245,8 @@ func (ssr *SomewhatSeekableReader) SeekTo(offset int64) error {
 ///////////////////////////////////////////////////////////////////////////
 
 type GDrive struct {
-	OAuthTransport            *oauth.Transport
-	Svc                       *drive.Service
+	oAuthTransport            *oauth.Transport
+	svc                       *drive.Service
 	verbose                   debugging
 	debug                     debugging
 	upload_bytes_per_second   int
@@ -266,7 +266,7 @@ func New(clientid, clientsecret, cacheFile string,
 		TokenCache:   oauth.CacheFile(cacheFile),
 	}
 
-	gd := GDrive{OAuthTransport: &oauth.Transport{
+	gd := GDrive{oAuthTransport: &oauth.Transport{
 		Config:    config,
 		Transport: http.DefaultTransport,
 	},
@@ -283,14 +283,14 @@ func New(clientid, clientsecret, cacheFile string,
 		fmt.Printf("Enter verification code: ")
 		var code string
 		fmt.Scanln(&code)
-		token, err = gd.OAuthTransport.Exchange(code)
+		token, err = gd.oAuthTransport.Exchange(code)
 		if err != nil {
 			return nil, err
 		}
 	}
-	gd.OAuthTransport.Token = token
+	gd.oAuthTransport.Token = token
 
-	gd.Svc, err = drive.New(gd.OAuthTransport.Client())
+	gd.svc, err = drive.New(gd.oAuthTransport.Client())
 	return &gd, err
 }
 
@@ -298,7 +298,7 @@ func (gd *GDrive) AddProperty(key, value string, driveFile *drive.File) error {
 	prop := &drive.Property{Key: key, Value: value}
 
 	for ntries := 0; ; ntries++ {
-		_, err := gd.Svc.Properties.Insert(driveFile.Id, prop).Do()
+		_, err := gd.svc.Properties.Insert(driveFile.Id, prop).Do()
 		if err == nil {
 			return nil
 		} else if err = gd.tryToHandleDriveAPIError(err, ntries); err != nil {
@@ -333,7 +333,7 @@ func (gd *GDrive) tryToHandleDriveAPIError(err error, ntries int) error {
 			// After an hour, the OAuth2 token expires and needs to
 			// be refreshed.
 			gd.debug.Printf("Trying OAuth2 token refresh.")
-			if err := gd.OAuthTransport.Refresh(); err == nil {
+			if err := gd.oAuthTransport.Refresh(); err == nil {
 				// Success
 				return nil
 			}
@@ -362,7 +362,7 @@ func (gd *GDrive) exponentialBackoff(ntries int, resp *http.Response, err error)
 // timeouts and transient errors.
 func (gd *GDrive) GetFileById(id string) (*drive.File, error) {
 	for ntries := 0; ; ntries++ {
-		file, err := gd.Svc.Files.Get(id).Do()
+		file, err := gd.svc.Files.Get(id).Do()
 		if err == nil {
 			return file, nil
 		} else if err = gd.tryToHandleDriveAPIError(err, ntries); err != nil {
@@ -427,7 +427,7 @@ func (gd *GDrive) RunQuery(query string) []*drive.File {
 	pageToken := ""
 	var result []*drive.File
 	for {
-		q := gd.Svc.Files.List().Q(query)
+		q := gd.svc.Files.List().Q(query)
 		if pageToken != "" {
 			q = q.PageToken(pageToken)
 		}
@@ -537,7 +537,7 @@ func (gd *GDrive) GetFileContentsReader(driveFile *drive.File) (io.ReadCloser, e
 			return nil, err
 		}
 
-		resp, err := gd.OAuthTransport.RoundTrip(request)
+		resp, err := gd.oAuthTransport.RoundTrip(request)
 
 		switch gd.handleHTTPResponse(resp, err, ntries) {
 		case Success:
@@ -579,7 +579,7 @@ func (gd *GDrive) handleHTTPResponse(resp *http.Response, err error, ntries int)
 		// After an hour, the OAuth2 token expires and needs to
 		// be refreshed.
 		gd.debug.Printf("Trying OAuth2 token refresh.")
-		if err = gd.OAuthTransport.Refresh(); err == nil {
+		if err = gd.oAuthTransport.Refresh(); err == nil {
 			// Success
 			return Retry
 		}
@@ -603,11 +603,11 @@ func (gd *GDrive) UpdateProperty(driveFile *drive.File, name string, newValue st
 	}
 
 	for nTriesGet := 0; ; nTriesGet++ {
-		prop, err := gd.Svc.Properties.Get(driveFile.Id, name).Do()
+		prop, err := gd.svc.Properties.Get(driveFile.Id, name).Do()
 		if err == nil {
 			prop.Value = newValue
 			for nTriesUpdate := 0; ; nTriesUpdate++ {
-				_, err = gd.Svc.Properties.Update(driveFile.Id,
+				_, err = gd.svc.Properties.Update(driveFile.Id,
 					name, prop).Do()
 				if err == nil {
 					// success
@@ -652,7 +652,7 @@ func (gd *GDrive) UploadFileContents(driveFile *drive.File, contentsReader io.Re
 	}
 
 	// And send it off...
-	resp, err := gd.OAuthTransport.RoundTrip(req)
+	resp, err := gd.oAuthTransport.RoundTrip(req)
 	if resp != nil {
 		defer googleapi.CloseBody(resp)
 	}
@@ -751,7 +751,7 @@ func (gd *GDrive) getResumableUploadURI(driveFile *drive.File, contentType strin
 
 	for ntries := 0; ; ntries++ {
 		gd.debug.Printf("Trying to get session URI")
-		resp, err := gd.OAuthTransport.RoundTrip(req)
+		resp, err := gd.oAuthTransport.RoundTrip(req)
 
 		if err == nil && resp != nil && resp.StatusCode == 200 {
 			uri := resp.Header["Location"][0]
@@ -788,7 +788,7 @@ func (gd *GDrive) getCurrentChunkStart(sessionURI string, contentLength int64,
 		req.Header.Set("Content-Length", "0")
 		req.ContentLength = 0
 		req.Header.Set("User-Agent", "skicka/0.1")
-		resp, err := gd.OAuthTransport.RoundTrip(req)
+		resp, err := gd.oAuthTransport.RoundTrip(req)
 
 		if resp == nil {
 			gd.debug.Printf("get current chunk start err %v", err)
@@ -818,7 +818,7 @@ func (gd *GDrive) getCurrentChunkStart(sessionURI string, contentLength int64,
 		} else if resp.StatusCode == 401 {
 			gd.debug.Printf("Trying OAuth2 token refresh.")
 			for r := 0; r < 6; r++ {
-				if err = gd.OAuthTransport.Refresh(); err == nil {
+				if err = gd.oAuthTransport.Refresh(); err == nil {
 					gd.debug.Printf("Token refresh success")
 					// Now once again try the PUT...
 					break
@@ -918,7 +918,7 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error, 
 		// be refreshed.
 		gd.debug.Printf("Trying OAuth2 token refresh.")
 		for r := 0; r < 6; r++ {
-			if err = gd.OAuthTransport.Refresh(); err == nil {
+			if err = gd.oAuthTransport.Refresh(); err == nil {
 				// Successful refresh; make sure we have
 				// the right offset for the next time
 				// around.
@@ -1001,7 +1001,7 @@ func (gd *GDrive) uploadFileContentsResumable(driveFile *drive.File, contentsRea
 		req.Header.Set("User-Agent", "skicka/0.1")
 
 		// Actually (try to) upload the chunk.
-		resp, err := gd.OAuthTransport.RoundTrip(req)
+		resp, err := gd.oAuthTransport.RoundTrip(req)
 
 		status, err := gd.handleResumableUploadResponse(resp, err,
 			driveFile, contentType, contentLength, &ntries, &currentOffset,
@@ -1033,7 +1033,7 @@ func (gd *GDrive) UpdateModificationTime(driveFile *drive.File, t time.Time) err
 
 	for ntries := 0; ; ntries++ {
 		f := &drive.File{ModifiedDate: t.UTC().Format(timeFormat)}
-		_, err := gd.Svc.Files.Patch(driveFile.Id, f).SetModifiedDate(true).Do()
+		_, err := gd.svc.Files.Patch(driveFile.Id, f).SetModifiedDate(true).Do()
 		if err == nil {
 			gd.debug.Printf("success: updated modification time on %s", driveFile.Title)
 			return nil
@@ -1052,7 +1052,7 @@ func (gd *GDrive) deleteIncompleteDriveFiles(title string, parentId string) {
 	files := gd.RunQuery(query)
 	for _, f := range files {
 		for ntries := 0; ; ntries++ {
-			err := gd.Svc.Files.Delete(f.Id).Do()
+			err := gd.svc.Files.Delete(f.Id).Do()
 			if err == nil {
 				return
 			} else if err = gd.tryToHandleDriveAPIError(err, ntries); err != nil {
@@ -1093,7 +1093,7 @@ func (gd *GDrive) InsertNewFolder(filename string, parent *drive.File,
 
 func (gd *GDrive) insertFile(f *drive.File) (*drive.File, error) {
 	for ntries := 0; ; ntries++ {
-		r, err := gd.Svc.Files.Insert(f).Do()
+		r, err := gd.svc.Files.Insert(f).Do()
 		if err == nil {
 			gd.debug.Printf("Created new Google Drive file for %s: ID=%s",
 				f.Title, r.Id)
@@ -1105,6 +1105,35 @@ func (gd *GDrive) insertFile(f *drive.File) (*drive.File, error) {
 		err = gd.tryToHandleDriveAPIError(err, ntries)
 		if err != nil {
 			return nil, fmt.Errorf("unable to create drive.File: %v", err)
+		}
+	}
+}
+
+func GetModificationTime(driveFile *drive.File) (time.Time, error) {
+	if driveFile.ModifiedDate != "" {
+		return time.Parse(time.RFC3339Nano, driveFile.ModifiedDate)
+	}
+	return time.Unix(0, 0), nil
+}
+
+func (gd *GDrive) DeleteFile(f *drive.File) error {
+	for ntries := 0; ; ntries++ {
+		err := gd.svc.Files.Delete(f.Id).Do()
+		if err == nil {
+			return nil
+		} else if err = gd.tryToHandleDriveAPIError(err, ntries); err != nil {
+			return fmt.Errorf("unable to delete file %s: %v", f.Title, err)
+		}
+	}
+}
+
+func (gd *GDrive) TrashFile(f *drive.File) error {
+	for ntries := 0; ; ntries++ {
+		_, err := gd.svc.Files.Trash(f.Id).Do()
+		if err == nil {
+			return nil
+		} else if err = gd.tryToHandleDriveAPIError(err, ntries); err != nil {
+			return fmt.Errorf("unable to trash file %s: %v", f.Title, err)
 		}
 	}
 }
