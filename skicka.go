@@ -38,6 +38,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -105,9 +106,28 @@ var (
 ///////////////////////////////////////////////////////////////////////////
 // Utility types
 
+var authre = regexp.MustCompile("Authorization: Bearer [^\\s]*")
+
+// sanitize attempts to remove sensitive values like authorization key
+// values from debugging output so that it can be shared without also
+// compromising the login credentials, etc.
+func sanitize(s string) string {
+	s = strings.Replace(s, config.Google.ClientId, "[***ClientId***]", -1)
+	s = strings.Replace(s, config.Google.ClientSecret, "[***ClientSecret***]", -1)
+	s = authre.ReplaceAllLiteralString(s, "Authorization: Bearer [***AuthToken***]")
+	return s
+}
+
+func debugNoPrint(s string, args ...interface{}) {
+}
+
+func debugPrint(s string, args ...interface{}) {
+	debug.Printf(s, args...)
+}
+
 func (d debugging) Printf(format string, args ...interface{}) {
 	if d {
-		log.Printf(format, args...)
+		log.Print(sanitize(fmt.Sprintf(format, args...)))
 	}
 }
 
@@ -658,8 +678,8 @@ func main() {
 		printUsageAndExit()
 	}
 
-	verbose = debugging(*vb || *dbg)
 	debug = debugging(*dbg)
+	verbose = debugging(*vb || bool(debug))
 
 	var err error
 	*configFilename, err = tildeExpand(*configFilename)
@@ -691,9 +711,18 @@ func main() {
 
 	readConfigFile(*configFilename)
 
+	// Set the appropriate callback function for the GDrive object to use
+	// for debugging output.
+	var dpf func(s string, args ...interface{})
+	if debug {
+		dpf = debugPrint
+	} else {
+		dpf = debugNoPrint
+	}
+
 	gd, err = gdrive.New(config.Google.ClientId, config.Google.ClientSecret,
 		*cachefile, config.Upload.Bytes_per_second_limit,
-		config.Download.Bytes_per_second_limit, bool(debug))
+		config.Download.Bytes_per_second_limit, dpf, *dbg)
 	if err != nil {
 		printErrorAndExit(fmt.Errorf("skicka: error creating Google Drive "+
 			"client: %v", err))

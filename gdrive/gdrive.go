@@ -37,6 +37,7 @@ import (
 	"log"
 	mathrand "math/rand"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -45,16 +46,6 @@ import (
 )
 
 const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
-
-///////////////////////////////////////////////////////////////////////////
-
-type debugging bool
-
-func (d debugging) Printf(format string, args ...interface{}) {
-	if d {
-		log.Printf(format, args...)
-	}
-}
 
 ///////////////////////////////////////////////////////////////////////////
 
@@ -222,7 +213,7 @@ type somewhatSeekableReader struct {
 	readOffset, writeOffset int64
 }
 
-func MakeSomewhatSeekableReader(r io.Reader, maxSeek int) *somewhatSeekableReader {
+func makeSomewhatSeekableReader(r io.Reader, maxSeek int) *somewhatSeekableReader {
 	return &somewhatSeekableReader{
 		R:           r,
 		buf:         make([]byte, maxSeek),
@@ -287,7 +278,7 @@ func (ssr *somewhatSeekableReader) SeekTo(offset int64) error {
 type GDrive struct {
 	oAuthTransport         *oauth.Transport
 	svc                    *drive.Service
-	debug                  debugging
+	debug                  func(s string, args ...interface{})
 	uploadBytesPerSecond   int
 	downloadBytesPerSecond int
 }
@@ -310,7 +301,7 @@ const maxRetries = 6
 // transient ones that don't clear up after multiple tries), it returns the
 // error code back and the caller should stop trying.
 func (gd *GDrive) tryToHandleDriveAPIError(err error, try int) error {
-	gd.debug.Printf("tryToHandleDriveAPIError: try %d error %T %+v",
+	gd.debug("tryToHandleDriveAPIError: try %d error %T %+v",
 		try, err, err)
 
 	if try == maxRetries {
@@ -321,7 +312,7 @@ func (gd *GDrive) tryToHandleDriveAPIError(err error, try int) error {
 		if err.Code == 401 {
 			// After an hour, the OAuth2 token expires and needs to
 			// be refreshed.
-			gd.debug.Printf("Trying OAuth2 token refresh.")
+			gd.debug("Trying OAuth2 token refresh.")
 			if err := gd.oAuthTransport.Refresh(); err == nil {
 				// Success
 				return nil
@@ -339,10 +330,10 @@ func (gd *GDrive) exponentialBackoff(try int, resp *http.Response, err error) {
 		time.Duration(mathrand.Int()%1000)*time.Millisecond
 	time.Sleep(s)
 	if resp != nil {
-		gd.debug.Printf("exponential backoff: slept %v for resp %d...", s,
+		gd.debug("exponential backoff: slept %v for resp %d...", s,
 			resp.StatusCode)
 	} else {
-		gd.debug.Printf("exponential backoff: slept %v for error %v...", s, err)
+		gd.debug("exponential backoff: slept %v for error %v...", s, err)
 	}
 }
 
@@ -418,7 +409,7 @@ func (gd *GDrive) handleHTTPResponse(resp *http.Response, err error,
 	if resp != nil && resp.StatusCode == 401 {
 		// After an hour, the OAuth2 token expires and needs to
 		// be refreshed.
-		gd.debug.Printf("Trying OAuth2 token refresh.")
+		gd.debug("Trying OAuth2 token refresh.")
 		if err = gd.oAuthTransport.Refresh(); err == nil {
 			// Success
 			return Retry
@@ -433,6 +424,25 @@ func (gd *GDrive) handleHTTPResponse(resp *http.Response, err error,
 	// giving up.
 	gd.exponentialBackoff(try, resp, err)
 	return Retry
+}
+
+type loggingTransport struct {
+	transport http.RoundTripper
+	gd        *GDrive
+}
+
+func (lt *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	dump, err := httputil.DumpRequestOut(req, false)
+	if err != nil {
+		// Don't report an error back from RoundTrip() just because
+		// DumpRequestOut() ran into trouble.
+		lt.gd.debug("error dumping http request: %v", err)
+	}
+
+	resp, err := lt.transport.RoundTrip(req)
+	lt.gd.debug("http request: %s   --> response: %+v\nerr: %v\n--------\n",
+		dump, resp, err)
+	return resp, err
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -450,7 +460,7 @@ func (gd *GDrive) handleHTTPResponse(resp *http.Response, err error,
 // operations are performed.
 func New(clientId, clientSecret, cacheFile string,
 	uploadBytesPerSecond, downloadBytesPerSecond int,
-	debug bool) (*GDrive, error) {
+	debug func(s string, args ...interface{}), dumphttp bool) (*GDrive, error) {
 	config := &oauth.Config{
 		ClientId:     clientId,
 		ClientSecret: clientSecret,
@@ -462,12 +472,17 @@ func New(clientId, clientSecret, cacheFile string,
 	}
 
 	gd := GDrive{oAuthTransport: &oauth.Transport{
-		Config:    config,
-		Transport: http.DefaultTransport,
+		Config: config,
 	},
-		debug:                  debugging(debug),
+		debug:                  debug,
 		uploadBytesPerSecond:   uploadBytesPerSecond,
 		downloadBytesPerSecond: downloadBytesPerSecond,
+	}
+	if dumphttp {
+		gd.oAuthTransport.Transport =
+			&loggingTransport{transport: http.DefaultTransport, gd: &gd}
+	} else {
+		gd.oAuthTransport.Transport = http.DefaultTransport
 	}
 
 	token, err := config.TokenCache.Token()
@@ -743,7 +758,7 @@ func (gd *GDrive) UploadFileContents(f *drive.File, contentsReader io.Reader,
 
 	switch gd.handleHTTPResponse(resp, err, try) {
 	case Success:
-		gd.debug.Printf("Success for %s: code %d", f.Title, resp.StatusCode)
+		gd.debug("Success for %s: code %d", f.Title, resp.StatusCode)
 		return nil
 	case Fail:
 		if err == nil {
@@ -834,20 +849,20 @@ func (gd *GDrive) getResumableUploadURI(f *drive.File, contentType string,
 	// PUTing to an existing file.
 
 	for try := 0; ; try++ {
-		gd.debug.Printf("Trying to get session URI")
+		gd.debug("Trying to get session URI")
 		resp, err := gd.oAuthTransport.RoundTrip(req)
 
 		if err == nil && resp != nil && resp.StatusCode == 200 {
 			uri := resp.Header["Location"][0]
-			gd.debug.Printf("Got resumable upload URI %s", uri)
+			gd.debug("Got resumable upload URI %s", uri)
 			return uri, nil
 		}
 		if err != nil {
-			gd.debug.Printf("getResumableUploadURI: %v", err)
+			gd.debug("getResumableUploadURI: %v", err)
 		}
 		if resp != nil {
 			b, _ := ioutil.ReadAll(resp.Body)
-			gd.debug.Printf("getResumableUploadURI status %d\n"+
+			gd.debug("getResumableUploadURI status %d\n"+
 				"Resp: %+v\nBody: %s", resp.StatusCode, *resp, b)
 		}
 		if try == maxRetries {
@@ -875,7 +890,7 @@ func (gd *GDrive) getCurrentChunkStart(sessionURI string, contentLength int64,
 		resp, err := gd.oAuthTransport.RoundTrip(req)
 
 		if resp == nil {
-			gd.debug.Printf("get current chunk start err %v", err)
+			gd.debug("get current chunk start err %v", err)
 			gd.exponentialBackoff(r, resp, err)
 			continue
 		}
@@ -884,7 +899,7 @@ func (gd *GDrive) getCurrentChunkStart(sessionURI string, contentLength int64,
 
 		if resp.StatusCode == 200 || resp.StatusCode == 201 {
 			// 200 or 201 here says we're actually all done
-			gd.debug.Printf("All done: %d from get content-range response",
+			gd.debug("All done: %d from get content-range response",
 				resp.StatusCode)
 			return Success, nil
 		} else if resp.StatusCode == 308 {
@@ -892,24 +907,24 @@ func (gd *GDrive) getCurrentChunkStart(sessionURI string, contentLength int64,
 			if err != nil {
 				return Fail, err
 			}
-			gd.debug.Printf("Updated start to %d after 308 from get "+
+			gd.debug("Updated start to %d after 308 from get "+
 				"content-range...", *currentOffset)
 			return Retry, nil
 		} else if resp.StatusCode == 401 {
-			gd.debug.Printf("Trying OAuth2 token refresh.")
+			gd.debug("Trying OAuth2 token refresh.")
 			for r := 0; r < 6; r++ {
 				if err = gd.oAuthTransport.Refresh(); err == nil {
-					gd.debug.Printf("Token refresh success")
+					gd.debug("Token refresh success")
 					// Now once again try the PUT...
 					break
 				} else {
-					gd.debug.Printf("refresh try %d fail %v", r, err)
+					gd.debug("refresh try %d fail %v", r, err)
 					gd.exponentialBackoff(r, nil, err)
 				}
 			}
 		}
 	}
-	gd.debug.Printf("couldn't recover from 503...")
+	gd.debug("couldn't recover from 503...")
 	return Fail, err
 }
 
@@ -954,12 +969,12 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
 	// Serious error (e.g. connection reset) where we didn't even get a
 	// HTTP response back from the server.  Try again (a few times).
 	if err != nil {
-		gd.debug.Printf("handleResumableUploadResponse error %v", err)
+		gd.debug("handleResumableUploadResponse error %v", err)
 		gd.exponentialBackoff(*try, resp, err)
 		return Retry, nil
 	}
 
-	gd.debug.Printf("got status %d from chunk for file %s", resp.StatusCode,
+	gd.debug("got status %d from chunk for file %s", resp.StatusCode,
 		f.Id, resp)
 
 	switch {
@@ -976,7 +991,7 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
 			return Fail, err
 		}
 		*try = 0
-		gd.debug.Printf("Updated currentOffset to %d after 308", *currentOffset)
+		gd.debug("Updated currentOffset to %d after 308", *currentOffset)
 		return Retry, nil
 
 	case resp.StatusCode == 404:
@@ -984,7 +999,7 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
 		// has a ~24 hour lifetime.)
 		*sessionURI, err = gd.getResumableUploadURI(f, contentType,
 			contentLength)
-		gd.debug.Printf("Got %v after updating URI from 404...", err)
+		gd.debug("Got %v after updating URI from 404...", err)
 		if err != nil {
 			return Fail, err
 		}
@@ -997,7 +1012,7 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
 	case resp.StatusCode == 401:
 		// After an hour, the OAuth2 token expires and needs to
 		// be refreshed.
-		gd.debug.Printf("Trying OAuth2 token refresh.")
+		gd.debug("Trying OAuth2 token refresh.")
 		for r := 0; r < maxRetries; r++ {
 			if err = gd.oAuthTransport.Refresh(); err == nil {
 				// Successful refresh; make sure we have
@@ -1006,13 +1021,13 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
 				return gd.getCurrentChunkStart(*sessionURI, contentLength,
 					currentOffset)
 			}
-			gd.debug.Printf("Token refresh fail %v", err)
+			gd.debug("Token refresh fail %v", err)
 			gd.exponentialBackoff(r, nil, err)
 		}
 		return Fail, err
 
 	case resp.StatusCode >= 500 && resp.StatusCode <= 599:
-		gd.debug.Printf("5xx response")
+		gd.debug("5xx response")
 		return gd.getCurrentChunkStart(*sessionURI, contentLength, currentOffset)
 
 	default:
@@ -1048,7 +1063,7 @@ func (gd *GDrive) UploadFileContentsResumable(driveFile *drive.File,
 	// TODO: what is a reasonable default here? Must be 256kB minimum.
 	chunkSize := 1024 * 1024
 
-	seekableReader := MakeSomewhatSeekableReader(contentsReader, 2*chunkSize)
+	seekableReader := makeSomewhatSeekableReader(contentsReader, 2*chunkSize)
 
 	// Upload the file in chunks of size chunkSize (or smaller, for the
 	// very last chunk).
@@ -1057,7 +1072,7 @@ func (gd *GDrive) UploadFileContentsResumable(driveFile *drive.File,
 		if end > contentLength {
 			end = contentLength
 		}
-		gd.debug.Printf("%s: uploading chunk %d - %d...", driveFile.Title,
+		gd.debug("%s: uploading chunk %d - %d...", driveFile.Title,
 			currentOffset, end)
 
 		// We should usually already be at the current offset; this
@@ -1116,13 +1131,13 @@ func (gd *GDrive) UploadFileContentsResumable(driveFile *drive.File,
 // UpdateModificationTime updates the modification time of the given Google
 // Drive file to the given time.
 func (gd *GDrive) UpdateModificationTime(f *drive.File, t time.Time) error {
-	gd.debug.Printf("updating modification time of %s to %v", f.Title, t)
+	gd.debug("updating modification time of %s to %v", f.Title, t)
 
 	for try := 0; ; try++ {
 		fp := &drive.File{ModifiedDate: t.UTC().Format(timeFormat)}
 		_, err := gd.svc.Files.Patch(f.Id, fp).SetModifiedDate(true).Do()
 		if err == nil {
-			gd.debug.Printf("success: updated modification time on %s", f.Title)
+			gd.debug("success: updated modification time on %s", f.Title)
 			return nil
 		} else if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
 			return err
@@ -1138,7 +1153,7 @@ func (gd *GDrive) deleteIncompleteDriveFiles(title string, parentId string) {
 	query := fmt.Sprintf("'%s' in parents and title='%s'", parentId, title)
 	files, err := gd.runQuery(query)
 	if err != nil {
-		gd.debug.Printf("unable to run query in deleteIncompleteDriveFiles(); "+
+		gd.debug("unable to run query in deleteIncompleteDriveFiles(); "+
 			"ignoring error: %v", err)
 		return
 	}
@@ -1192,11 +1207,11 @@ func (gd *GDrive) insertFile(f *drive.File) (*drive.File, error) {
 	for try := 0; ; try++ {
 		r, err := gd.svc.Files.Insert(f).Do()
 		if err == nil {
-			gd.debug.Printf("Created new Google Drive file for %s: ID=%s",
+			gd.debug("Created new Google Drive file for %s: ID=%s",
 				f.Title, r.Id)
 			return r, nil
 		}
-		gd.debug.Printf("Error %v trying to create drive file for %s. "+
+		gd.debug("Error %v trying to create drive file for %s. "+
 			"Deleting detrius...", err, f.Title)
 		gd.deleteIncompleteDriveFiles(f.Title, f.Parents[0].Id)
 		err = gd.tryToHandleDriveAPIError(err, try)
