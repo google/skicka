@@ -95,11 +95,12 @@ func (r RetryHTTPTransmitError) Error() string {
 // This value is reduced by the rateLimitedReader.Read() method when data is
 // uploaded or downloaded, and is periodically increased by the task
 // launched by launchBandwidthTask().
-var bandwidthBudget int
+var availableTransmitBytes int
 var bandwidthTaskRunning bool
 
-// Mutex to protect bandwidthBudget.
-var bandwidthBudgetMutex sync.Mutex
+// Mutex to protect availableTransmitBytes.
+var bandwidthMutex sync.Mutex
+var bandwidthCond = sync.NewCond(&bandwidthMutex)
 
 func launchBandwidthTask(bytesPerSecond int) {
 	if bytesPerSecond == 0 {
@@ -107,155 +108,153 @@ func launchBandwidthTask(bytesPerSecond int) {
 		return
 	}
 
-	bandwidthBudgetMutex.Lock()
+	bandwidthMutex.Lock()
+	defer bandwidthMutex.Unlock()
 	if bandwidthTaskRunning {
-		bandwidthBudget = bytesPerSecond
-		bandwidthBudgetMutex.Unlock()
 		return
+	} else {
+		bandwidthTaskRunning = true
 	}
-
-	bandwidthTaskRunning = true
-	bandwidthBudgetMutex.Unlock()
 
 	go func() {
 		for {
-			bandwidthBudgetMutex.Lock()
+			bandwidthMutex.Lock()
 
 			// Release 1/8th of the per-second limit every 8th of a second.
 			// The 92/100 factor in the amount released adds some slop to
 			// account for TCP/IP overhead in an effort to have the actual
 			// bandwidth used not exceed the desired limit.
-			bandwidthBudget += bytesPerSecond * 92 / 100 / 8
-			if bandwidthBudget > bytesPerSecond {
-				bandwidthBudget = bytesPerSecond
+			availableTransmitBytes += bytesPerSecond * 92 / 100 / 8
+			if availableTransmitBytes > bytesPerSecond {
+				// Don't ever queue up more than one second's worth of
+				// transmission.
+				availableTransmitBytes = bytesPerSecond
 			}
 
-			bandwidthBudgetMutex.Unlock()
+			// Wake up any threads that are waiting for more bandwidth now
+			// that we've doled some more out.
+			bandwidthCond.Broadcast()
+			bandwidthMutex.Unlock()
+
+			// Note that if the system is heavily loaded, it may be much
+			// more than 1/8 of a second before the thread runs again, in
+			// which case, the full second's bandwidth allotment won't be
+			// released. We could instead track how much time has passed
+			// between the last sleep and the following wakeup and adjust
+			// the amount of bandwidth released accordingly if this turned
+			// out to be an issue in practice.
 			time.Sleep(time.Duration(125) * time.Millisecond)
 		}
 	}()
 }
 
-// rateLimitedReader is an io.Reader implementation that returns no more bytes
-// than the current value of bandwidthBudget.  Thus, as long as the upload and
-// download paths wrap the underlying io.Readers for local files and GETs
-// from Drive (respectively), then we should stay under the bandwidth per
-// second limit.
+// rateLimitedReader is an io.Reader implementation that returns no more
+// bytes than the current value of availableTransmitBytes.  Thus, as long
+// as the upload and download paths wrap the underlying io.Readers for
+// local files and GETs from Drive (respectively), then we should stay
+// under the bandwidth per second limit.
 type rateLimitedReader struct {
-	R io.Reader
-	C io.Closer
+	R io.ReadCloser
 }
 
 func (lr rateLimitedReader) Read(dst []byte) (int, error) {
 	// Loop until some amount of bandwidth is available.
+	bandwidthMutex.Lock()
 	for {
-		bandwidthBudgetMutex.Lock()
-		if bandwidthBudget < 0 {
+		if availableTransmitBytes < 0 {
 			panic("bandwidth budget went negative")
 		}
-		if bandwidthBudget > 0 {
+		if availableTransmitBytes > 0 {
 			break
 		}
 
-		// No further uploading is possible at the moment;
-		// sleep for a bit and then we'll try the loop
-		// again and see if we have better luck...
-		// TODO: we could also wait on a condition
-		// variable and wait to be signaled by the "add
-		// more available upload bytes" thread.
-		bandwidthBudgetMutex.Unlock()
-		time.Sleep(time.Duration(100) * time.Millisecond)
+		// No further uploading is possible at the moment; wait for the
+		// thread that periodically doles out more bandwidth to do its
+		// thing, at which point it will signal the condition variable.
+		bandwidthCond.Wait()
 	}
 
 	// The caller would like us to return up to this many bytes...
 	n := len(dst)
 
 	// but don't try to upload more than we're allowed to...
-	if n > bandwidthBudget {
-		n = bandwidthBudget
+	if n > availableTransmitBytes {
+		n = availableTransmitBytes
 	}
 
 	// Update the budget for the maximum amount of what we may consume and
 	// relinquish the lock so that other workers can claim bandwidth.
-	bandwidthBudget -= n
-	bandwidthBudgetMutex.Unlock()
+	availableTransmitBytes -= n
+	bandwidthMutex.Unlock()
 
 	read, err := lr.R.Read(dst[:n])
 	if read < n {
 		// It may turn out that the amount we read from the original
 		// io.Reader is less than the caller asked for; in this case,
 		// we give back the bandwidth that we reserved but didn't use.
-		bandwidthBudgetMutex.Lock()
-		bandwidthBudget += n - read
-		bandwidthBudgetMutex.Unlock()
+		bandwidthMutex.Lock()
+		availableTransmitBytes += n - read
+		bandwidthMutex.Unlock()
 	}
 
 	return read, err
 }
 
 func (lr rateLimitedReader) Close() error {
-	if lr.C != nil {
-		return lr.C.Close()
-	}
-	return nil
+	return lr.R.Close()
 }
 
 ///////////////////////////////////////////////////////////////////////////
 
-// SomewhatSeekableReader is an io.Reader that can seek backwards from the
+// somewhatSeekableReader is an io.Reader that can seek backwards from the
 // current offset up to 'bufSize' bytes. It's useful for chunked file
 // uploads, where we may need to rewind a bit after a failed chunk, but
 // definitely don't want to pay the overhead of having the entire file in
-// memory.
+// memory to be able to rewind arbitrarily for.
 //
 // It is implemented as a ring-buffer: the current offset in buf to read
 // from is in readOffset, and the currentOffset to copy values read from
 // the reader to is in writeOffset.  Both of these are taken mod bufSize
 // when used to compute offsets into buf.
-type SomewhatSeekableReader struct {
+type somewhatSeekableReader struct {
 	R                       io.Reader
 	buf                     []byte
-	bufSize                 int
 	readOffset, writeOffset int64
 }
 
-func MakeSomewhatSeekableReader(r io.Reader, size int) *SomewhatSeekableReader {
-	return &SomewhatSeekableReader{
+func MakeSomewhatSeekableReader(r io.Reader, maxSeek int) *somewhatSeekableReader {
+	return &somewhatSeekableReader{
 		R:           r,
-		buf:         make([]byte, size),
-		bufSize:     size,
+		buf:         make([]byte, maxSeek),
 		readOffset:  0,
 		writeOffset: 0,
 	}
 }
 
-func (ssr *SomewhatSeekableReader) Read(b []byte) (int, error) {
+func (ssr *somewhatSeekableReader) Read(b []byte) (int, error) {
 	// If the caller has called Seek() to move backwards from the
 	// current read point of the underlying reader R, we start by
 	// copying values from our local buffer into the output buffer.
 	nCopied := 0
 	if ssr.readOffset < ssr.writeOffset {
 		for ; ssr.readOffset < ssr.writeOffset && nCopied < len(b); nCopied++ {
-			b[nCopied] = ssr.buf[ssr.readOffset%int64(ssr.bufSize)]
+			b[nCopied] = ssr.buf[ssr.readOffset%int64(len(ssr.buf))]
 			ssr.readOffset++
-		}
-		if nCopied == len(b) {
-			return nCopied, nil
 		}
 	}
 
-	// Once we're through the values we have locally buffered, we read
-	// from the underlying reader. Note that we read into b[] starting
-	// at the point where we stopped copying local values.
+	// Once we're through the values we have buffered from previous reads,
+	// we read from the underlying reader. Note that we read into b[]
+	// starting at the point where we stopped copying buffered values.
 	nRead, err := ssr.R.Read(b[nCopied:])
 
 	// Now update our local buffer of read values.  Note that this loop
-	// is a bit wasteful in the case where nRead > ssr.bufSize; some of
+	// is a bit wasteful in the case where nRead > len(ssr.buf); some of
 	// the values it writes will be clobbered by a later iteration of
 	// the loop.  (It's not clear that this is a big enough issue to
 	// really worry about.)
 	for i := 0; i < nRead; i++ {
-		ssr.buf[ssr.writeOffset%int64(ssr.bufSize)] = b[nCopied+i]
+		ssr.buf[ssr.writeOffset%int64(len(ssr.buf))] = b[nCopied+i]
 		ssr.readOffset++
 		ssr.writeOffset++
 	}
@@ -263,11 +262,15 @@ func (ssr *SomewhatSeekableReader) Read(b []byte) (int, error) {
 	return nCopied + nRead, err
 }
 
-func (ssr *SomewhatSeekableReader) SeekTo(offset int64) error {
+func (ssr *somewhatSeekableReader) SeekTo(offset int64) error {
 	if offset > ssr.writeOffset {
-		panic("invalid seek")
+		// We could support seeking past the extent that the file has been
+		// read (by just doing a bunch of Read() calls), but this isn't
+		// really necessary currently...
+		return fmt.Errorf("invalid seek to %d, past current write offset %d",
+			offset, ssr.writeOffset)
 	}
-	if ssr.writeOffset-offset > int64(ssr.bufSize) {
+	if ssr.writeOffset-offset > int64(len(ssr.buf)) {
 		return fmt.Errorf("can't seek back to %d; current offset %d",
 			offset, ssr.writeOffset)
 	}
@@ -292,6 +295,8 @@ type GDrive struct {
 ///////////////////////////////////////////////////////////////////////////
 // Utility routines
 
+const maxRetries = 6
+
 // There are a number of cases where the Google Drive API returns an error
 // code but where it's possible to recover from the error; examples include
 // 401 errors when the OAuth2 token expires after an hour, or 403/500 errors
@@ -300,15 +305,15 @@ type GDrive struct {
 // of times that we've tried to call the API entrypoint already and does
 // its best to handle the error.
 //
-// If it thinks it may have been successful, it returns nil, and the caller
-// should try the call again. For unrecoverable errors (or too many errors
-// in a row), it returns the error code back and the caller should stop trying.
-func (gd *GDrive) tryToHandleDriveAPIError(err error, ntries int) error {
-	gd.debug.Printf("tryToHandleDriveAPIError: ntries %d error %T %+v",
-		ntries, err, err)
+// If it thinks the error may be transient, it returns nil, and the caller
+// should try the call again. For unrecoverable errors (or putatively
+// transient ones that don't clear up after multiple tries), it returns the
+// error code back and the caller should stop trying.
+func (gd *GDrive) tryToHandleDriveAPIError(err error, try int) error {
+	gd.debug.Printf("tryToHandleDriveAPIError: try %d error %T %+v",
+		try, err, err)
 
-	maxAPIRetries := 6
-	if ntries == maxAPIRetries {
+	if try == maxRetries {
 		return err
 	}
 	switch err := err.(type) {
@@ -325,39 +330,39 @@ func (gd *GDrive) tryToHandleDriveAPIError(err error, ntries int) error {
 		}
 	}
 
-	gd.exponentialBackoff(ntries, nil, err)
+	gd.exponentialBackoff(try, nil, err)
 	return nil
 }
 
-func (gd *GDrive) exponentialBackoff(ntries int, resp *http.Response, err error) {
-	s := time.Duration(1<<uint(ntries))*time.Second +
+func (gd *GDrive) exponentialBackoff(try int, resp *http.Response, err error) {
+	s := time.Duration(1<<uint(try))*time.Second +
 		time.Duration(mathrand.Int()%1000)*time.Millisecond
 	time.Sleep(s)
 	if resp != nil {
-		gd.debug.Printf("exponential backoff: slept for resp %d...", resp.StatusCode)
+		gd.debug.Printf("exponential backoff: slept %v for resp %d...", s,
+			resp.StatusCode)
 	} else {
-		gd.debug.Printf("exponential backoff: slept for error %v...", err)
+		gd.debug.Printf("exponential backoff: slept %v for error %v...", s, err)
 	}
 }
 
-// Google Drive identifies each file with a unique Id string; this function
-// returns the *drive.File corresponding to a given Id, dealing with
-// timeouts and transient errors.
+// getFileById returns the *drive.File corresponding to the string Id
+// Google Drive uses to uniquely identify the file. It deals with timeouts
+// and transient errors.
 func (gd *GDrive) getFileById(id string) (*drive.File, error) {
-	for ntries := 0; ; ntries++ {
+	for try := 0; ; try++ {
 		file, err := gd.svc.Files.Get(id).Do()
 		if err == nil {
 			return file, nil
-		} else if err = gd.tryToHandleDriveAPIError(err, ntries); err != nil {
+		} else if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
 			return nil, err
 		}
 	}
 }
 
-// Execute the given query with the Google Drive API, returning an array of
-// files that match the query's conditions. Handles transient HTTP errors and
-// the like.
-func (gd *GDrive) runQuery(query string) []*drive.File {
+// runQuery executes the given query with the Google Drive API, returning
+// an array of files that match the query's conditions.
+func (gd *GDrive) runQuery(query string) ([]*drive.File, error) {
 	pageToken := ""
 	var result []*drive.File
 	for {
@@ -366,15 +371,14 @@ func (gd *GDrive) runQuery(query string) []*drive.File {
 			q = q.PageToken(pageToken)
 		}
 
-		for ntries := 0; ; ntries++ {
+		for try := 0; ; try++ {
 			r, err := q.Do()
 			if err == nil {
 				result = append(result, r.Items...)
 				pageToken = r.NextPageToken
 				break
-			} else if err = gd.tryToHandleDriveAPIError(err, ntries); err != nil {
-				log.Fatalf("couldn't run Google Drive query: %v",
-					err)
+			} else if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
+				return nil, err
 			}
 		}
 
@@ -382,7 +386,7 @@ func (gd *GDrive) runQuery(query string) []*drive.File {
 			break
 		}
 	}
-	return result
+	return result, nil
 }
 
 type HTTPResponseResult int
@@ -394,20 +398,20 @@ const (
 	RefreshURI                    = iota
 )
 
-const maxHTTPRetries = 6
-
 // We've gotten an *http.Response (maybe) and an error (maybe) back after
 // performing some HTTP operation; this function takes care of figuring
 // out if the operation succeeded, refreshes OAuth2 tokens if expiration
 // was the cause of the failure, takes care of exponential back-off for
 // transient errors, etc.  It then returns a HTTPResponseResult to the
 // caller, indicating how it should proceed.
-func (gd *GDrive) handleHTTPResponse(resp *http.Response, err error, ntries int) HTTPResponseResult {
-	if err == nil && resp != nil && resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+func (gd *GDrive) handleHTTPResponse(resp *http.Response, err error,
+	try int) HTTPResponseResult {
+	if err == nil && resp != nil && resp.StatusCode >= 200 &&
+		resp.StatusCode <= 299 {
 		return Success
 	}
 
-	if ntries == maxHTTPRetries {
+	if try == maxRetries {
 		return Fail
 	}
 
@@ -427,7 +431,7 @@ func (gd *GDrive) handleHTTPResponse(resp *http.Response, err error, ntries int)
 	// other timeouts/connection resets here. Therefore, for all errors, we
 	// sleep (with exponential backoff) and try again a few times before
 	// giving up.
-	gd.exponentialBackoff(ntries, resp, err)
+	gd.exponentialBackoff(try, resp, err)
 	return Retry
 }
 
@@ -439,7 +443,7 @@ func (gd *GDrive) handleHTTPResponse(resp *http.Response, err error, ntries int)
 // the path to a file that caches OAuth2 authorization tokens.
 //
 // The uploadBytesPerSecond and downloadBytesPerSecond parameters can be
-// used to specify bandwidth limited if rate-limited uploads or downloads
+// used to specify bandwidth limits if rate-limited uploads or downloads
 // are desired.  If zero, bandwidth use is unconstrained.
 //
 // Finally, if debug is true, then debugging information will be printed as
@@ -486,14 +490,14 @@ func New(clientId, clientSecret, cacheFile string,
 
 // AddProperty adds the property with given key and value to the provided
 // file and updates the file in Google Drive.
-func (gd *GDrive) AddProperty(key, value string, driveFile *drive.File) error {
+func (gd *GDrive) AddProperty(key, value string, f *drive.File) error {
 	prop := &drive.Property{Key: key, Value: value}
 
-	for ntries := 0; ; ntries++ {
-		_, err := gd.svc.Properties.Insert(driveFile.Id, prop).Do()
+	for try := 0; ; try++ {
+		_, err := gd.svc.Properties.Insert(f.Id, prop).Do()
 		if err == nil {
 			return nil
-		} else if err = gd.tryToHandleDriveAPIError(err, ntries); err != nil {
+		} else if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
 			return fmt.Errorf("unable to create %s property: %v",
 				prop.Key, err)
 		}
@@ -503,8 +507,8 @@ func (gd *GDrive) AddProperty(key, value string, driveFile *drive.File) error {
 // GetProperty returns the property of the given name associated with the
 // given file, if the named property is present.  If the property isn't
 // present in the fie, then an empty string and an error are returned.
-func GetProperty(driveFile *drive.File, name string) (string, error) {
-	for _, prop := range driveFile.Properties {
+func GetProperty(f *drive.File, name string) (string, error) {
+	for _, prop := range f.Properties {
 		if prop.Key == name {
 			return prop.Value, nil
 		}
@@ -543,7 +547,10 @@ func (gd *GDrive) GetFile(path string) (*drive.File, error) {
 func (gd *GDrive) GetFileInFolder(filename string, folder *drive.File) (*drive.File, error) {
 	query := fmt.Sprintf("title='%s' and '%s' in parents and trashed=false",
 		filename, folder.Id)
-	files := gd.runQuery(query)
+	files, err := gd.runQuery(query)
+	if err != nil {
+		return nil, err
+	}
 
 	if len(files) == 0 {
 		return nil, FileNotFoundError{
@@ -557,14 +564,18 @@ func (gd *GDrive) GetFileInFolder(filename string, folder *drive.File) (*drive.F
 }
 
 // Add all of the the *drive.Files in 'parentFolder' to the provided map from
-// pathnames to *driveFiles. Assumes that 'path' is the path down to
+// pathnames to *drive.Files. Assumes that 'path' is the path down to
 // 'parentFolder' when constructing pathnames of files. If 'recursive' is true,
 // also includes all files in the full hierarchy under the given folder.
 // Otherwise, only the files directly in the folder are returned.
 func (gd *GDrive) getFolderContents(path string, parentFolder *drive.File,
 	recursive bool, existingFiles map[string]*drive.File) error {
 	query := fmt.Sprintf("trashed=false and '%s' in parents", parentFolder.Id)
-	dirfiles := gd.runQuery(query)
+	dirfiles, err := gd.runQuery(query)
+	if err != nil {
+		return err
+	}
+
 	for _, f := range dirfiles {
 		filepath := filepath.Clean(path + "/" + f.Title)
 		if _, ok := existingFiles[filepath]; ok == true {
@@ -617,26 +628,31 @@ func (gd *GDrive) GetFilesUnderFolder(path string, recursive, includeBase,
 	return existingFiles, nil
 }
 
+// IsFolder returns a boolean indicating whether the given *drive.File is a
+// folder.
 func IsFolder(f *drive.File) bool {
 	return f.MimeType == "application/vnd.google-apps.folder"
 }
 
-// Get the contents of the *drive.File as an io.ReadCloser.
-func (gd *GDrive) GetFileContents(driveFile *drive.File) (io.ReadCloser, error) {
+// GetFileContents returns an io.ReadCloser that provides the contents of
+// the given *drive.File.
+func (gd *GDrive) GetFileContents(f *drive.File) (io.ReadCloser, error) {
 	// The file download URL expires some hours after it's retrieved;
 	// re-grab the file right before downloading it so that we have a
 	// fresh URL.
-	driveFile, err := gd.getFileById(driveFile.Id)
+	f, err := gd.getFileById(f.Id)
 	if err != nil {
 		return nil, err
 	}
 
-	url := driveFile.DownloadUrl
+	url := f.DownloadUrl
 	if url == "" {
-		url = driveFile.ExportLinks[driveFile.MimeType]
+		// Google Drive files can't be downloaded directly via DownloadUrl,
+		// but can be exported to another format that can be downloaded.
+		url = f.ExportLinks[f.MimeType]
 	}
 
-	for ntries := 0; ; ntries++ {
+	for try := 0; ; try++ {
 		request, err := http.NewRequest("GET", url, nil)
 		if err != nil {
 			return nil, err
@@ -644,12 +660,12 @@ func (gd *GDrive) GetFileContents(driveFile *drive.File) (io.ReadCloser, error) 
 
 		resp, err := gd.oAuthTransport.RoundTrip(request)
 
-		switch gd.handleHTTPResponse(resp, err, ntries) {
+		switch gd.handleHTTPResponse(resp, err, try) {
 		case Success:
 			// Rate-limit the download, if required.
 			if gd.downloadBytesPerSecond > 0 {
 				launchBandwidthTask(gd.downloadBytesPerSecond)
-				return rateLimitedReader{R: resp.Body, C: resp.Body}, nil
+				return rateLimitedReader{R: resp.Body}, nil
 			}
 			return resp.Body, nil
 		case Fail:
@@ -659,47 +675,58 @@ func (gd *GDrive) GetFileContents(driveFile *drive.File) (io.ReadCloser, error) 
 	}
 }
 
-func (gd *GDrive) UpdateProperty(driveFile *drive.File, name string, newValue string) error {
-	if oldValue, err := GetProperty(driveFile, name); err == nil {
-		if oldValue == newValue {
-			return nil
+// UpdateProperty updates the property with name 'name' to 'value' in
+// the given *drive.File on Google Drive.
+func (gd *GDrive) UpdateProperty(f *drive.File, key string, value string) error {
+	var prop *drive.Property
+	for _, prop = range f.Properties {
+		if prop.Key == key {
+			if prop.Value == value {
+				// Save the network round-trip and return, since the
+				// property already has the desired value.
+				return nil
+			}
+			break
 		}
 	}
 
-	for nTriesGet := 0; ; nTriesGet++ {
-		prop, err := gd.svc.Properties.Get(driveFile.Id, name).Do()
+	if prop == nil {
+		prop = &drive.Property{Key: key, Value: value}
+	}
+
+	for try := 0; ; try++ {
+		_, err := gd.svc.Properties.Update(f.Id, key, prop).Do()
 		if err == nil {
-			prop.Value = newValue
-			for nTriesUpdate := 0; ; nTriesUpdate++ {
-				_, err = gd.svc.Properties.Update(driveFile.Id, name, prop).Do()
-				if err == nil {
-					// success
-					return nil
-				} else if err = gd.tryToHandleDriveAPIError(err, nTriesUpdate); err != nil {
-					return err
-				}
-			}
-		} else if err = gd.tryToHandleDriveAPIError(err, nTriesGet); err != nil {
+			// success
+			return nil
+		} else if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
 			return err
 		}
 	}
 }
 
-// Upload the file contents given by the io.Reader to the given *drive.File.
-func (gd *GDrive) UploadFileContents(driveFile *drive.File, contentsReader io.Reader,
-	length int64, currentTry int) error {
-	// Kick off a background thread to periodically allow uploading
-	// a bit more data.  This allowance is consumed by the
-	// rateLimitedReader Read() function.
-	launchBandwidthTask(gd.uploadBytesPerSecond)
-
+// UploadFileContents uploads the file contents given by the io.Reader to
+// the given *drive.File.  The upload may fail due to various transient
+// network errors; as such, the caller should check to see if a non-nil
+// returned error code is a RetryHTTPTransmitError.  In this case, it
+// should try again, providing a new io.Reader that points to the start of
+// the file.  The 'try' parameter should track how many times this function
+// has been called to try to upload the given file due to
+// RetryHTTPTransmitErrors.
+func (gd *GDrive) UploadFileContents(f *drive.File, contentsReader io.Reader,
+	length int64, try int) error {
 	// Limit upload bandwidth, if requested..
 	if gd.uploadBytesPerSecond > 0 {
-		contentsReader = &rateLimitedReader{R: contentsReader}
+		// Kick off a background thread to periodically allow uploading
+		// a bit more data.  This allowance is consumed by the
+		// rateLimitedReader Read() function.
+		launchBandwidthTask(gd.uploadBytesPerSecond)
+
+		contentsReader = &rateLimitedReader{R: ioutil.NopCloser(contentsReader)}
 	}
 
 	// Get the PUT request for the upload.
-	req, err := prepareUploadPUT(driveFile, contentsReader, length)
+	req, err := prepareUploadPUT(f, contentsReader, length)
 	if err != nil {
 		return err
 	}
@@ -714,9 +741,9 @@ func (gd *GDrive) UploadFileContents(driveFile *drive.File, contentsReader io.Re
 		defer googleapi.CloseBody(resp)
 	}
 
-	switch gd.handleHTTPResponse(resp, err, currentTry) {
+	switch gd.handleHTTPResponse(resp, err, try) {
 	case Success:
-		gd.debug.Printf("Success for %s: code %d", driveFile.Title, resp.StatusCode)
+		gd.debug.Printf("Success for %s: code %d", f.Title, resp.StatusCode)
 		return nil
 	case Fail:
 		if err == nil {
@@ -737,13 +764,13 @@ func (gd *GDrive) UploadFileContents(driveFile *drive.File, contentsReader io.Re
 	}
 }
 
-func prepareUploadPUT(driveFile *drive.File, contentsReader io.Reader,
+func prepareUploadPUT(f *drive.File, contentsReader io.Reader,
 	length int64) (*http.Request, error) {
 	params := make(url.Values)
 	params.Set("uploadType", "media")
 
 	urls := fmt.Sprintf("https://www.googleapis.com/upload/drive/v2/files/%s",
-		url.QueryEscape(driveFile.Id))
+		url.QueryEscape(f.Id))
 	urls += "?" + params.Encode()
 
 	contentsReader, contentType, err := detectContentType(contentsReader)
@@ -784,16 +811,16 @@ func detectContentType(contentsReader io.Reader) (io.Reader, string, error) {
 	return contentsReader, contentType, nil
 }
 
-func (gd *GDrive) getResumableUploadURI(driveFile *drive.File, contentType string,
+func (gd *GDrive) getResumableUploadURI(f *drive.File, contentType string,
 	length int64) (string, error) {
 	params := make(url.Values)
 	params.Set("uploadType", "resumable")
 
 	urls := fmt.Sprintf("https://www.googleapis.com/upload/drive/v2/files/%s",
-		driveFile.Id)
+		f.Id)
 	urls += "?" + params.Encode()
 
-	body, err := googleapi.WithoutDataWrapper.JSONReader(driveFile)
+	body, err := googleapi.WithoutDataWrapper.JSONReader(f)
 	if err != nil {
 		return "", err
 	}
@@ -806,7 +833,7 @@ func (gd *GDrive) getResumableUploadURI(driveFile *drive.File, contentType strin
 	// We actually don't need any content in the request, since we're
 	// PUTing to an existing file.
 
-	for ntries := 0; ; ntries++ {
+	for try := 0; ; try++ {
 		gd.debug.Printf("Trying to get session URI")
 		resp, err := gd.oAuthTransport.RoundTrip(req)
 
@@ -823,12 +850,12 @@ func (gd *GDrive) getResumableUploadURI(driveFile *drive.File, contentType strin
 			gd.debug.Printf("getResumableUploadURI status %d\n"+
 				"Resp: %+v\nBody: %s", resp.StatusCode, *resp, b)
 		}
-		if ntries == 5 {
+		if try == maxRetries {
 			// Give up...
 			return "", err
 		}
 
-		gd.exponentialBackoff(ntries, resp, err)
+		gd.exponentialBackoff(try, resp, err)
 	}
 }
 
@@ -839,7 +866,7 @@ func (gd *GDrive) getResumableUploadURI(driveFile *drive.File, contentType strin
 func (gd *GDrive) getCurrentChunkStart(sessionURI string, contentLength int64,
 	currentOffset *int64) (HTTPResponseResult, error) {
 	var err error
-	for r := 0; r < 6; r++ {
+	for r := 0; r < maxRetries; r++ {
 		req, _ := http.NewRequest("PUT", sessionURI, nil)
 		req.Header.Set("Content-Range", fmt.Sprintf("bytes */%d", contentLength))
 		req.Header.Set("Content-Length", "0")
@@ -854,10 +881,6 @@ func (gd *GDrive) getCurrentChunkStart(sessionURI string, contentLength int64,
 		}
 
 		defer resp.Body.Close()
-		b, _ := ioutil.ReadAll(resp.Body)
-		gd.debug.Printf("Get current chunk start err %v resp status %d, "+
-			"body %s\nRESP %v",
-			err, resp.StatusCode, b, *resp)
 
 		if resp.StatusCode == 200 || resp.StatusCode == 201 {
 			// 200 or 201 here says we're actually all done
@@ -908,22 +931,23 @@ func updateStartFromResponse(resp *http.Response) (int64, error) {
 // When we upload a file chunk, a variety of responses may come back from
 // the server, ranging from permanent errors to transient errors, to
 // success codes.  This function processes the http.Response and maps it to
-// a HTTPResponseResult code.  It also may update *ntries, the conut of how
+// a HTTPResponseResult code.  It also may update *try, the conut of how
 // many times we've tried in a row to upload a chunk, *start, the current
 // offset into the file being uploaded, and *sessionURI, the URI to which
 // chunks for the file should be uploaded to.
 func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
-	driveFile *drive.File, contentType string, contentLength int64, ntries *int,
+	f *drive.File, contentType string, contentLength int64, try *int,
 	currentOffset *int64, sessionURI *string) (HTTPResponseResult, error) {
-	if *ntries == 6 {
+	if *try == maxRetries {
 		if err != nil {
-			return Fail, fmt.Errorf("giving up after 6 retries: %v", err)
+			return Fail, fmt.Errorf("giving up after %d retries: %v",
+				maxRetries, err)
 		} else if resp.StatusCode == 403 {
-			return Fail, fmt.Errorf("giving up after 6 retries: " +
-				"rate limit exceeded")
+			return Fail, fmt.Errorf("giving up after %d retries: "+
+				"rate limit exceeded", maxRetries)
 		} else {
-			return Fail, fmt.Errorf("giving up after 6 retries: %s",
-				resp.Status)
+			return Fail, fmt.Errorf("giving up after %d retries: %s",
+				maxRetries, resp.Status)
 		}
 	}
 
@@ -931,12 +955,12 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
 	// HTTP response back from the server.  Try again (a few times).
 	if err != nil {
 		gd.debug.Printf("handleResumableUploadResponse error %v", err)
-		gd.exponentialBackoff(*ntries, resp, err)
+		gd.exponentialBackoff(*try, resp, err)
 		return Retry, nil
 	}
 
 	gd.debug.Printf("got status %d from chunk for file %s", resp.StatusCode,
-		driveFile.Id, resp)
+		f.Id, resp)
 
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode <= 299:
@@ -951,22 +975,22 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
 		if err != nil {
 			return Fail, err
 		}
-		*ntries = 0
+		*try = 0
 		gd.debug.Printf("Updated currentOffset to %d after 308", *currentOffset)
 		return Retry, nil
 
 	case resp.StatusCode == 404:
 		// The upload URI has expired; we need to refresh it. (It
 		// has a ~24 hour lifetime.)
-		*sessionURI, err = gd.getResumableUploadURI(driveFile,
-			contentType, contentLength)
+		*sessionURI, err = gd.getResumableUploadURI(f, contentType,
+			contentLength)
 		gd.debug.Printf("Got %v after updating URI from 404...", err)
 		if err != nil {
 			return Fail, err
 		}
 
 		// Use the new URI to find the offset to start at.
-		*ntries = 0
+		*try = 0
 		return gd.getCurrentChunkStart(*sessionURI, contentLength,
 			currentOffset)
 
@@ -974,7 +998,7 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
 		// After an hour, the OAuth2 token expires and needs to
 		// be refreshed.
 		gd.debug.Printf("Trying OAuth2 token refresh.")
-		for r := 0; r < 6; r++ {
+		for r := 0; r < maxRetries; r++ {
 			if err = gd.oAuthTransport.Refresh(); err == nil {
 				// Successful refresh; make sure we have
 				// the right offset for the next time
@@ -992,11 +1016,17 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
 		return gd.getCurrentChunkStart(*sessionURI, contentLength, currentOffset)
 
 	default:
-		gd.exponentialBackoff(*ntries, resp, err)
+		gd.exponentialBackoff(*try, resp, err)
 		return Retry, nil
 	}
 }
 
+// UploadFileContentsResumable uses the resumable upload protocol to upload
+// the file contents from the given Reader to the given *drive.File on
+// Google Drive.  This approach is more expensive than UploadFileContents()
+// for files under a few megabytes, but is helpful for large files in that
+// it's more robust to transient errors and can handle OAuth2 token
+// refreshes in the middle of an upload, unlike the regular approach.
 func (gd *GDrive) UploadFileContentsResumable(driveFile *drive.File,
 	contentsReader io.Reader, contentLength int64) error {
 	contentsReader, contentType, err := detectContentType(contentsReader)
@@ -1022,7 +1052,7 @@ func (gd *GDrive) UploadFileContentsResumable(driveFile *drive.File,
 
 	// Upload the file in chunks of size chunkSize (or smaller, for the
 	// very last chunk).
-	for currentOffset, ntries := int64(0), 0; currentOffset < contentLength; ntries++ {
+	for currentOffset, try := int64(0), 0; currentOffset < contentLength; try++ {
 		end := currentOffset + int64(chunkSize)
 		if end > contentLength {
 			end = contentLength
@@ -1045,18 +1075,13 @@ func (gd *GDrive) UploadFileContentsResumable(driveFile *drive.File,
 			N: end - currentOffset,
 		}
 		if gd.uploadBytesPerSecond > 0 {
-			body = &rateLimitedReader{R: body}
+			body = &rateLimitedReader{R: ioutil.NopCloser(body)}
 		}
 
-		all, err := ioutil.ReadAll(body)
-		if int64(len(all)) != end-currentOffset {
-			log.Fatalf("reader gave us %d bytes, expected %d, bye", len(all),
-				end-currentOffset)
+		req, err := http.NewRequest("PUT", sessionURI, body)
+		if err != nil {
+			return err
 		}
-		req, _ := http.NewRequest("PUT", sessionURI, bytes.NewReader(all))
-		// TODO: why not this, skip ReadAll?
-		//		req, _ := http.NewRequest("PUT", sessionURI, body)
-
 		req.ContentLength = int64(end - currentOffset)
 		req.Header.Set("Content-Type", contentType)
 		req.Header.Set("Content-Range",
@@ -1067,17 +1092,14 @@ func (gd *GDrive) UploadFileContentsResumable(driveFile *drive.File,
 		resp, err := gd.oAuthTransport.RoundTrip(req)
 
 		status, err := gd.handleResumableUploadResponse(resp, err,
-			driveFile, contentType, contentLength, &ntries, &currentOffset,
+			driveFile, contentType, contentLength, &try, &currentOffset,
 			&sessionURI)
 
 		if resp != nil {
 			googleapi.CloseBody(resp)
-		}
-		if status == Fail {
+		} else if status == Fail {
 			return err
-		}
-
-		if status == Success {
+		} else if status == Success {
 			// The entire file has been uploaded successfully.
 			return nil
 		}
@@ -1091,16 +1113,18 @@ func (gd *GDrive) UploadFileContentsResumable(driveFile *drive.File,
 	return fmt.Errorf("uploaded entire file but didn't get 2xx status on last chunk")
 }
 
-func (gd *GDrive) UpdateModificationTime(driveFile *drive.File, t time.Time) error {
-	gd.debug.Printf("updating modification time of %s to %v", driveFile.Title, t)
+// UpdateModificationTime updates the modification time of the given Google
+// Drive file to the given time.
+func (gd *GDrive) UpdateModificationTime(f *drive.File, t time.Time) error {
+	gd.debug.Printf("updating modification time of %s to %v", f.Title, t)
 
-	for ntries := 0; ; ntries++ {
-		f := &drive.File{ModifiedDate: t.UTC().Format(timeFormat)}
-		_, err := gd.svc.Files.Patch(driveFile.Id, f).SetModifiedDate(true).Do()
+	for try := 0; ; try++ {
+		fp := &drive.File{ModifiedDate: t.UTC().Format(timeFormat)}
+		_, err := gd.svc.Files.Patch(f.Id, fp).SetModifiedDate(true).Do()
 		if err == nil {
-			gd.debug.Printf("success: updated modification time on %s", driveFile.Title)
+			gd.debug.Printf("success: updated modification time on %s", f.Title)
 			return nil
-		} else if err = gd.tryToHandleDriveAPIError(err, ntries); err != nil {
+		} else if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
 			return err
 		}
 	}
@@ -1112,13 +1136,19 @@ func (gd *GDrive) UpdateModificationTime(driveFile *drive.File, t time.Time) err
 // files with the same name.
 func (gd *GDrive) deleteIncompleteDriveFiles(title string, parentId string) {
 	query := fmt.Sprintf("'%s' in parents and title='%s'", parentId, title)
-	files := gd.runQuery(query)
+	files, err := gd.runQuery(query)
+	if err != nil {
+		gd.debug.Printf("unable to run query in deleteIncompleteDriveFiles(); "+
+			"ignoring error: %v", err)
+		return
+	}
+
 	for _, f := range files {
-		for ntries := 0; ; ntries++ {
+		for try := 0; ; try++ {
 			err := gd.svc.Files.Delete(f.Id).Do()
 			if err == nil {
-				return
-			} else if err = gd.tryToHandleDriveAPIError(err, ntries); err != nil {
+				break
+			} else if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
 				log.Fatalf("error deleting 403 Google Drive file "+
 					"for %s (ID %s): %v", title, f.Id, err)
 			}
@@ -1126,36 +1156,40 @@ func (gd *GDrive) deleteIncompleteDriveFiles(title string, parentId string) {
 	}
 }
 
-// Given an initialized *drive.File structure, create an actual file in Google
-// Drive. The returned a *drive.File represents the file in Drive.
+// InsertNewFile creates an actual file in Google Drive with the given
+// filename.  The new file is in the folder given by represented by the
+// 'parent' parameter, is initialized to have the given modification time
+// and the provided Google Drive file properties.  The returned *drive.File
+// value represents the file in Drive.
 func (gd *GDrive) InsertNewFile(filename string, parent *drive.File,
 	modTime time.Time, proplist []*drive.Property) (*drive.File, error) {
-	folderParent := &drive.ParentReference{Id: parent.Id}
+	pr := &drive.ParentReference{Id: parent.Id}
 	f := &drive.File{
 		Title:        filepath.Base(filename),
 		MimeType:     "application/octet-stream",
-		Parents:      []*drive.ParentReference{folderParent},
+		Parents:      []*drive.ParentReference{pr},
 		ModifiedDate: modTime.UTC().Format(timeFormat),
 		Properties:   proplist,
 	}
 	return gd.insertFile(f)
 }
 
+// InsertNewFolder creates a new folder in Google Drive with given name.
 func (gd *GDrive) InsertNewFolder(filename string, parent *drive.File,
 	modTime time.Time, proplist []*drive.Property) (*drive.File, error) {
-	parentref := &drive.ParentReference{Id: parent.Id}
+	pr := &drive.ParentReference{Id: parent.Id}
 	f := &drive.File{
 		Title:        filename,
 		MimeType:     "application/vnd.google-apps.folder",
 		ModifiedDate: modTime.UTC().Format(timeFormat),
-		Parents:      []*drive.ParentReference{parentref},
+		Parents:      []*drive.ParentReference{pr},
 		Properties:   proplist,
 	}
 	return gd.insertFile(f)
 }
 
 func (gd *GDrive) insertFile(f *drive.File) (*drive.File, error) {
-	for ntries := 0; ; ntries++ {
+	for try := 0; ; try++ {
 		r, err := gd.svc.Files.Insert(f).Do()
 		if err == nil {
 			gd.debug.Printf("Created new Google Drive file for %s: ID=%s",
@@ -1165,37 +1199,43 @@ func (gd *GDrive) insertFile(f *drive.File) (*drive.File, error) {
 		gd.debug.Printf("Error %v trying to create drive file for %s. "+
 			"Deleting detrius...", err, f.Title)
 		gd.deleteIncompleteDriveFiles(f.Title, f.Parents[0].Id)
-		err = gd.tryToHandleDriveAPIError(err, ntries)
+		err = gd.tryToHandleDriveAPIError(err, try)
 		if err != nil {
 			return nil, fmt.Errorf("unable to create drive.File: %v", err)
 		}
 	}
 }
 
-func GetModificationTime(driveFile *drive.File) (time.Time, error) {
-	if driveFile.ModifiedDate != "" {
-		return time.Parse(time.RFC3339Nano, driveFile.ModifiedDate)
+// GetModificationTime returns the modification time of the given Google
+// Drive file as a time.Time.
+func GetModificationTime(f *drive.File) (time.Time, error) {
+	if f.ModifiedDate != "" {
+		return time.Parse(time.RFC3339Nano, f.ModifiedDate)
 	}
 	return time.Unix(0, 0), nil
 }
 
+// DeleteFile deletes the given file from Google Drive; note that delection
+// is permanent and un-reversable!  (Consider TrashFile instead.)
 func (gd *GDrive) DeleteFile(f *drive.File) error {
-	for ntries := 0; ; ntries++ {
+	for try := 0; ; try++ {
 		err := gd.svc.Files.Delete(f.Id).Do()
 		if err == nil {
 			return nil
-		} else if err = gd.tryToHandleDriveAPIError(err, ntries); err != nil {
+		} else if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
 			return fmt.Errorf("unable to delete file %s: %v", f.Title, err)
 		}
 	}
 }
 
+// TrashFile moves the given Google Drive file to the trash; it is not
+// immediately deleted permanently.
 func (gd *GDrive) TrashFile(f *drive.File) error {
-	for ntries := 0; ; ntries++ {
+	for try := 0; ; try++ {
 		_, err := gd.svc.Files.Trash(f.Id).Do()
 		if err == nil {
 			return nil
-		} else if err = gd.tryToHandleDriveAPIError(err, ntries); err != nil {
+		} else if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
 			return fmt.Errorf("unable to trash file %s: %v", f.Title, err)
 		}
 	}
