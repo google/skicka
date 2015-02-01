@@ -22,6 +22,7 @@ package main
 import (
 	"fmt"
 	"github.com/google/skicka/gdrive"
+	"os"
 )
 
 type removeDirectoryError struct {
@@ -35,12 +36,6 @@ func (err removeDirectoryError) Error() string {
 		msg += fmt.Sprintf("%s: ", err.invokingCmd)
 	}
 	return fmt.Sprintf("%s%s: is a directory", msg, err.path)
-}
-
-var rmSyntaxError = CommandSyntaxError{
-	Cmd: "rm",
-	Msg: "drive path cannot be empty.\n" +
-		"Usage: rm [-r, -s] <drive path ...>",
 }
 
 func rm(args []string) {
@@ -59,7 +54,10 @@ func rm(args []string) {
 	}
 
 	if len(drivePaths) == 0 {
-		printErrorAndExit(rmSyntaxError)
+		fmt.Printf("rm: drive path cannot be empty.\n")
+		fmt.Printf("Usage: rm [-r, -s] <drive path ...>\n")
+		fmt.Printf("Run \"skicka help\" for more detailed help text.\n")
+		os.Exit(1)
 	}
 
 	for _, path := range drivePaths {

@@ -709,7 +709,7 @@ func main() {
 	case "ls":
 		ls(args)
 	case "mkdir":
-		Mkdir(args)
+		mkdir(args)
 	case "upload":
 		Upload(args)
 	case "download":
