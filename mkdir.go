@@ -34,7 +34,7 @@ func mkdirUsage() {
 	os.Exit(1)
 }
 
-func mkdir(args []string) {
+func mkdir(args []string) int {
 	if len(args) == 0 {
 		mkdirUsage()
 	}
@@ -48,6 +48,7 @@ func mkdir(args []string) {
 		mkdirUsage()
 	}
 
+	errs := 0
 	for ; i < len(args); i++ {
 		drivePath := filepath.Clean(args[i])
 
@@ -79,29 +80,37 @@ func mkdir(args []string) {
 						parent, err = createDriveFolder(dir, 0755, time.Now(), parent)
 						debug.Printf("Creating folder %s", pathSoFar)
 						if err != nil {
-							printErrorAndExit(fmt.Errorf("skicka: %s: %v",
-								pathSoFar, err))
+							fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", pathSoFar, err)
+							errs++
+							break
 						}
 					} else {
-						printErrorAndExit(fmt.Errorf("skicka: %s: no such "+
-							"directory", pathSoFar))
+						fmt.Fprintf(os.Stderr, "skicka: %s: no such directory\n",
+							pathSoFar)
+						errs++
+						break
 					}
 				} else {
-					printErrorAndExit(err)
+					fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", pathSoFar, err)
+					errs++
+					break
 				}
 			} else {
 				// Found it; if it's a folder this is good, unless it's
 				// the folder we were supposed to be creating.
 				if index+1 == nDirs && !makeIntermediate {
-					printErrorAndExit(fmt.Errorf("skicka: %s: already exists",
-						pathSoFar))
+					fmt.Fprintf(os.Stderr, "skicka: %s: already exists\n", pathSoFar)
+					errs++
+					break
 				} else if !gdrive.IsFolder(file) {
-					printErrorAndExit(fmt.Errorf("skicka: %s: not a folder",
-						pathSoFar))
+					fmt.Fprintf(os.Stderr, "skicka: %s: not a folder\n", pathSoFar)
+					errs++
+					break
 				} else {
 					parent = file
 				}
 			}
 		}
 	}
+	return errs
 }

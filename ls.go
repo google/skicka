@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"github.com/google/skicka/gdrive"
 	"google.golang.org/api/drive/v2"
+	"os"
 	"path/filepath"
 	"sort"
 	"time"
@@ -52,7 +53,7 @@ func getPermissionsAsString(driveFile *drive.File) (string, error) {
 	return str, nil
 }
 
-func ls(args []string) {
+func ls(args []string) int {
 	// Parse command line arguments.
 	long := false
 	longlong := false
@@ -75,6 +76,7 @@ func ls(args []string) {
 		argFilenames = append(argFilenames, "/")
 	}
 
+	errs := 0
 	for index, drivePath := range argFilenames {
 		drivePath = filepath.Clean(drivePath)
 
@@ -88,7 +90,9 @@ func ls(args []string) {
 		existingFiles, err := gd.GetFilesUnderFolder(drivePath, recursive, includeBase,
 			mustExist)
 		if err != nil {
-			printErrorAndExit(fmt.Errorf("skicka: %v", err))
+			fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", drivePath, err)
+			errs++
+			continue
 		}
 
 		// Sort the individual filenames returned.
@@ -139,6 +143,6 @@ func ls(args []string) {
 		if len(argFilenames) > 1 && index < len(argFilenames)-1 {
 			fmt.Printf("\n")
 		}
-
 	}
+	return errs
 }

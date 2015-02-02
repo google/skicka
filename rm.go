@@ -25,20 +25,7 @@ import (
 	"os"
 )
 
-type removeDirectoryError struct {
-	path        string
-	invokingCmd string
-}
-
-func (err removeDirectoryError) Error() string {
-	msg := ""
-	if err.invokingCmd != "" {
-		msg += fmt.Sprintf("%s: ", err.invokingCmd)
-	}
-	return fmt.Sprintf("%s%s: is a directory", msg, err.path)
-}
-
-func rm(args []string) {
+func rm(args []string) int {
 	recursive, skipTrash := false, false
 	var drivePaths []string
 
@@ -57,27 +44,35 @@ func rm(args []string) {
 		fmt.Printf("rm: drive path cannot be empty.\n")
 		fmt.Printf("Usage: rm [-r, -s] <drive path ...>\n")
 		fmt.Printf("Run \"skicka help\" for more detailed help text.\n")
-		os.Exit(1)
+		return 1
 	}
 
+	errs := 0
 	for _, path := range drivePaths {
 		if err := checkRmPossible(path, recursive); err != nil {
 			if _, ok := err.(gdrive.FileNotFoundError); ok {
 				// if there's an encrypted version on drive, let the user know and exit
-				oldPath := path
-				path += encryptionSuffix
-				if err := checkRmPossible(path, recursive); err == nil {
-					printErrorAndExit(fmt.Errorf("skicka rm: Found no file with path %s, but found encrypted version with path %s.\n"+
-						"If you would like to rm the encrypted version, re-run the command adding the %s extension onto the path.",
-						oldPath, path, encryptionSuffix))
+				encpath := path + encryptionSuffix
+				if err := checkRmPossible(encpath, recursive); err == nil {
+					fmt.Fprintf(os.Stderr, "skicka: %s: file not found, but found "+
+						"encrypted version with path %s.\n"+
+						"To remove the encrypted version, re-run the command adding "+
+						"the %s extension.\n",
+						path, encpath, encryptionSuffix)
+					errs++
+					continue
 				}
 			}
-			printErrorAndExit(err)
+			fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", path, err)
+			errs++
+			continue
 		}
 
 		f, err := gd.GetFile(path)
 		if err != nil {
-			printErrorAndExit(err)
+			fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", path, err)
+			errs++
+			continue
 		}
 
 		if skipTrash {
@@ -86,30 +81,20 @@ func rm(args []string) {
 			err = gd.TrashFile(f)
 		}
 		if err != nil {
-			printErrorAndExit(err)
+			fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", path, err)
+			errs++
+			continue
 		}
 	}
+	return errs
 }
 
 func checkRmPossible(path string, recursive bool) error {
-	invokingCmd := "skicka rm"
-
 	driveFile, err := gd.GetFile(path)
 	if err != nil {
-		switch err.(type) {
-		case gdrive.FileNotFoundError:
-			return gdrive.NewFileNotFoundError(path, invokingCmd)
-		default:
-			return err
-		}
+		return err
+	} else if !recursive && gdrive.IsFolder(driveFile) {
+		return fmt.Errorf("skicka: %s: is a folder", path)
 	}
-
-	if !recursive && gdrive.IsFolder(driveFile) {
-		return removeDirectoryError{
-			path:        path,
-			invokingCmd: invokingCmd,
-		}
-	}
-
 	return nil
 }

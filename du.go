@@ -22,25 +22,32 @@ package main
 import (
 	"fmt"
 	"github.com/google/skicka/gdrive"
+	"os"
 	"path/filepath"
 	"sort"
 )
 
-func du(args []string) {
+func du(args []string) int {
 	if len(args) == 0 {
-		printUsageAndExit()
+		fmt.Printf("Usage: skicka du <drive path...>\n")
+		fmt.Printf("Run \"skicka help\" for more detailed help text.\n")
+		return 1
 	}
 
+	errs := 0
 	for _, drivePath := range args {
 		drivePath = filepath.Clean(drivePath)
 
+		// Get all of the files under drivePath from Google Drive.
 		recursive := true
 		includeBase := false
 		mustExist := true
 		existingFiles, err := gd.GetFilesUnderFolder(drivePath, recursive, includeBase,
 			mustExist)
 		if err != nil {
-			printErrorAndExit(fmt.Errorf("skicka: %v", err))
+			fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
+			errs++
+			continue
 		}
 
 		// Accumulate the size in bytes of each folder in the hierarchy
@@ -60,11 +67,12 @@ func du(args []string) {
 			}
 		}
 
-		// Print output
+		// Print output.
 		sort.Strings(dirNames)
 		for _, d := range dirNames {
 			fmt.Printf("%s  %s\n", fmtbytes(folderSize[d], true), d)
 		}
 		fmt.Printf("%s  %s\n", fmtbytes(totalSize, true), drivePath)
 	}
+	return errs
 }

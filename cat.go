@@ -27,20 +27,27 @@ import (
 	"path/filepath"
 )
 
-func Cat(args []string) {
+func cat(args []string) int {
 	if len(args) == 0 {
-		printUsageAndExit()
+		fmt.Printf("Usage: skicka cat <drive path...>\n")
+		fmt.Printf("Run \"skicka help\" for more detailed help text.\n")
+		return 1
 	}
 
+	errs := 0
 	for _, fn := range args {
 		fn := filepath.Clean(fn)
 
 		file, err := gd.GetFile(fn)
 		if err != nil {
-			printErrorAndExit(err)
+			fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", fn, err)
+			errs++
+			continue
 		}
 		if gdrive.IsFolder(file) {
-			printErrorAndExit(fmt.Errorf("skicka: %s: is a directory", fn))
+			fmt.Fprintf(os.Stderr, "skicka: %s: is a directory\n", fn)
+			errs++
+			continue
 		}
 
 		contentsReader, err := gd.GetFileContents(file)
@@ -48,13 +55,18 @@ func Cat(args []string) {
 			if contentsReader != nil {
 				contentsReader.Close()
 			}
-			printErrorAndExit(fmt.Errorf("skicka: %s: %v", fn, err))
+			fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", fn, err)
+			errs++
+			continue
 		}
 
 		_, err = io.Copy(os.Stdout, contentsReader)
 		contentsReader.Close()
 		if err != nil {
-			printErrorAndExit(fmt.Errorf("skicka: %s: %v", fn, err))
+			fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", fn, err)
+			errs++
+			continue
 		}
 	}
+	return errs
 }

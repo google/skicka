@@ -730,22 +730,24 @@ func main() {
 
 	args := flag.Args()[1:]
 
+	errs := 0
 	switch cmd {
 	case "du":
-		du(args)
+		errs = du(args)
 	case "cat":
-		Cat(args)
+		errs = cat(args)
 	case "ls":
-		ls(args)
+		errs = ls(args)
 	case "mkdir":
-		mkdir(args)
+		errs = mkdir(args)
 	case "upload":
 		Upload(args)
 	case "download":
 		Download(args)
 	case "rm":
-		rm(args)
+		errs = rm(args)
 	default:
 		printUsageAndExit()
 	}
+	os.Exit(errs)
 }
