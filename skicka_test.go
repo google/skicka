@@ -2,12 +2,8 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"github.com/cheggaaa/pb"
-	"google.golang.org/api/drive/v2"
 	"os"
-	runtimeDebug "runtime/debug"
-	"strings"
 	"testing"
 )
 
@@ -50,31 +46,32 @@ func TestThatProgressBarCanRewindProgress(t *testing.T) {
 
 	reader := bytes.NewReader(make([]byte, nBytesToDownload))
 	dst := make([]byte, 1<<7)
-	byteCountingReader := &ByteCountingReader{
+	bcr := &byteCountingReader{
 		R: reader,
 	}
 
-	read, _ := byteCountingReader.Read(dst)
+	read, _ := bcr.Read(dst)
 	if 1<<7 != read {
 		t.Fatalf("Expected to read %d bytes but read %d byte[s]", 1<<7, read)
 	}
 
 	// Pretend a failure happened, rewind progress
-	progressBar.Add64(int64(0 - byteCountingReader.bytesRead))
+	progressBar.Add64(int64(0 - bcr.bytesRead))
 	// reset variables
 	reader = bytes.NewReader(make([]byte, nBytesToDownload))
-	byteCountingReader = &ByteCountingReader{
+	bcr = &byteCountingReader{
 		R: reader,
 	}
 
-	read, _ = byteCountingReader.Read(dst)
-	read, _ = byteCountingReader.Read(dst)
-	if len(dst) != read || nBytesToDownload != int64(byteCountingReader.bytesRead) {
+	read, _ = bcr.Read(dst)
+	read, _ = bcr.Read(dst)
+	if len(dst) != read || nBytesToDownload != int64(bcr.bytesRead) {
 		t.Fatalf("Expected to read %d bytes but read %d byte[s] and "+
 			"to accumulate %d bytes but accumulated %d byte[s]", len(dst), nBytesToDownload)
 	}
 }
 
+/*
 type notExistsQueryer struct {
 	path      string
 	recursive bool
@@ -240,3 +237,4 @@ func expectErrorWithMessage(t *testing.T, err error, msg string) {
 			msg, err)
 	}
 }
+*/

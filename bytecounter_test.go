@@ -8,16 +8,16 @@ import (
 
 func TestInitializationOfByteCountingReader(t *testing.T) {
 	byteReader := bytes.NewReader(make([]byte, 6))
-	byteCountingReader := ByteCountingReader{
+	bcr := byteCountingReader{
 		R: byteReader,
 	}
 
-	if byteCountingReader.bytesRead != 0 {
+	if bcr.bytesRead != 0 {
 		t.Fatalf("Expected an initialization value of 0 of the byteCountReader, but got: %v",
-			byteCountingReader.bytesRead)
+			bcr.bytesRead)
 	}
 
-	if byteCountingReader.R != byteReader {
+	if bcr.R != byteReader {
 		t.Fatal("Initialization of ByteCountingReader struct failure")
 	}
 }
@@ -29,24 +29,24 @@ func TestMultipleReadsAccumlateBytesCorrectly(t *testing.T) {
 	sixBytes := []byte{'a', 'b', 'c', 'd', 'e', 'f'}
 	byteReader := bytes.NewReader(sixBytes)
 	oneByte := make([]byte, 1)
-	byteCountingReader := ByteCountingReader{
+	bcr := byteCountingReader{
 		R: byteReader,
 	}
 
-	for read, err := byteCountingReader.Read(oneByte); read > 0; {
+	for read, err := bcr.Read(oneByte); read > 0; {
 		if err != nil {
 			t.Fatalf("Expected no error, but got: %v", err)
 		}
 		if read != 1 {
 			t.Fatalf("Expected to read 1 byte, but instead read %d byte[s].", read)
 		}
-		read, err = byteCountingReader.Read(oneByte)
+		read, err = bcr.Read(oneByte)
 	}
 
 	expectedByteCount := 6
-	if byteCountingReader.bytesRead != expectedByteCount {
+	if bcr.bytesRead != expectedByteCount {
 		t.Fatalf("The byte counting reader should have accumulated %d bytes, but accumulated %d",
-			expectedByteCount, byteCountingReader.bytesRead)
+			expectedByteCount, bcr.bytesRead)
 	}
 }
 
@@ -54,10 +54,10 @@ func TestSingleReadAccumulatesBytesCorrectly(t *testing.T) {
 	sixBytes := []byte{'a', 'b', 'c', 'd', 'e', 'f'}
 	byteReader := bytes.NewReader(sixBytes)
 	tenBytes := make([]byte, 10)
-	byteCountingReader := ByteCountingReader{
+	bcr := byteCountingReader{
 		R: byteReader,
 	}
-	read, err := byteCountingReader.Read(tenBytes)
+	read, err := bcr.Read(tenBytes)
 	if err != nil && io.EOF != err {
 		t.Fatalf("Expected that if error is not nil, then it is of type io.EOF.  Here it was of type %T", err)
 	}
@@ -66,9 +66,9 @@ func TestSingleReadAccumulatesBytesCorrectly(t *testing.T) {
 		t.Fatalf("Expected to have read 6 bytes, but read %d byte[s]", read)
 	}
 
-	if byteCountingReader.bytesRead != 6 {
+	if bcr.bytesRead != 6 {
 		t.Fatalf("Expected to have accumulated 6 bytes, but accumulated %d byte[s]",
-			byteCountingReader.bytesRead)
+			bcr.bytesRead)
 	}
 }
 
@@ -77,35 +77,35 @@ func TestByteCountingReaderCanAccumulateFromDifferentReaders(t *testing.T) {
 	sixByteReader, eightByteReader := bytes.NewReader(sixBytes), bytes.NewReader(eightBytes)
 	buffer := make([]byte, 3)
 
-	byteCountingReader := ByteCountingReader{
+	bcr := byteCountingReader{
 		R: sixByteReader,
 	}
 
 	read := 1
 	for read > 0 {
-		read, _ = byteCountingReader.Read(buffer)
+		read, _ = bcr.Read(buffer)
 	}
 
-	byteCountingReader.R = eightByteReader
+	bcr.R = eightByteReader
 	read = 1
 	for read > 0 {
-		read, _ = byteCountingReader.Read(buffer)
+		read, _ = bcr.Read(buffer)
 	}
 
 	expectedAccumulatedBytes := 14
-	if expectedAccumulatedBytes != byteCountingReader.bytesRead {
+	if expectedAccumulatedBytes != bcr.bytesRead {
 		t.Fatalf("Expected ByteCountingReader to have read %d byte[s], but read %d byte[s]",
-			expectedAccumulatedBytes, byteCountingReader.bytesRead)
+			expectedAccumulatedBytes, bcr.bytesRead)
 	}
 }
 
 func TestByteCountingReaderImplementsIoReader(t *testing.T) {
 	byteReader := bytes.NewReader(make([]byte, 6))
-	byteCountingReader := &ByteCountingReader{
+	bcr := &byteCountingReader{
 		R: byteReader,
 	}
 
-	_, ok := interface{}(byteCountingReader).(io.Reader)
+	_, ok := interface{}(bcr).(io.Reader)
 	if !ok {
 		t.Fatal("Expected ByteCountingReader to implement io.Reader interface, but it did not.")
 	}
