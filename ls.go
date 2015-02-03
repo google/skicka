@@ -59,16 +59,24 @@ func ls(args []string) int {
 	longlong := false
 	recursive := false
 	var argFilenames []string
-	for _, value := range args {
-		switch {
-		case value == "-l":
+	for _, arg := range args {
+		if len(argFilenames) > 0 {
+			// After the end of command-line arguments, all subsequent args
+			// are treated as filenames, regardless of whether they match
+			// any of the flags.
+			argFilenames = append(argFilenames, arg)
+		} else if arg == "-l" {
 			long = true
-		case value == "-ll":
+		} else if arg == "-ll" {
 			longlong = true
-		case value == "-r":
+		} else if arg == "-r" {
 			recursive = true
-		default:
-			argFilenames = append(argFilenames, value)
+		} else if arg[0] == '-' {
+			fmt.Printf("Usage: skicka ls [-l,-ll,-r] <drive path...>\n")
+			fmt.Printf("Run \"skicka help\" for more detailed help text.\n")
+			return 1
+		} else {
+			argFilenames = append(argFilenames, arg)
 		}
 	}
 
