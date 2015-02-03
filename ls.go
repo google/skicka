@@ -25,7 +25,6 @@ import (
 	"google.golang.org/api/drive/v2"
 	"os"
 	"path/filepath"
-	"sort"
 	"time"
 )
 
@@ -39,6 +38,8 @@ func getPermissionsAsString(driveFile *drive.File) (string, error) {
 
 	perm, err := getPermissions(driveFile)
 	if err != nil {
+		// No permissions are available if the file was uploaded via the
+		// Drive Web page, for example.
 		str += "?????????"
 	} else {
 		rwx := "rwx"
@@ -95,7 +96,7 @@ func ls(args []string) int {
 		// Get the files for the current path from Google Drive.
 		includeBase := false
 		mustExist := true
-		existingFiles, err := gd.GetFilesUnderFolder(drivePath, recursive, includeBase,
+		files, err := gd.GetFilesUnderPath(drivePath, recursive, includeBase,
 			mustExist)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", drivePath, err)
@@ -104,43 +105,38 @@ func ls(args []string) int {
 		}
 
 		// Sort the individual filenames returned.
-		var filenames []string
-		for f := range existingFiles {
-			filenames = append(filenames, f)
-		}
-		sort.Strings(filenames)
+		sorted := files.GetSorted()
 
-		for _, f := range filenames {
-			file := existingFiles[f]
-			printFilename := f
+		for _, f := range sorted {
+			printFilename := f.Path
 			if !recursive {
-				printFilename = filepath.Base(f)
+				printFilename = filepath.Base(printFilename)
 			}
-			if gdrive.IsFolder(file) {
+			if gdrive.IsFolder(f.File) {
 				printFilename += "/"
 			}
 			if long || longlong {
-				synctime, _ := gdrive.GetModificationTime(file)
-				permString, _ := getPermissionsAsString(file)
+				synctime, _ := gdrive.GetModificationTime(f.File)
+				permString, _ := getPermissionsAsString(f.File)
 				if longlong {
-					md5 := file.Md5Checksum
+					md5 := f.File.Md5Checksum
 					if len(md5) != 32 {
 						md5 = "--------------------------------"
 					}
 					fmt.Printf("%s  %s  %s  %s  %s\n", permString,
-						fmtbytes(file.FileSize, true), md5,
+						fmtbytes(f.File.FileSize, true), md5,
 						synctime.Format(time.ANSIC), printFilename)
 					if debug {
 						fmt.Printf("\t[ ")
-						for _, prop := range file.Properties {
+						for _, prop := range f.File.Properties {
 							fmt.Printf("%s: %s, ", prop.Key,
 								prop.Value)
 						}
-						fmt.Printf("id: %s ]\n", file.Id)
+						fmt.Printf("id: %s ]\n", f.File.Id)
 					}
 				} else {
 					fmt.Printf("%s  %s  %s  %s\n", permString,
-						fmtbytes(file.FileSize, true),
+						fmtbytes(f.File.FileSize, true),
 						synctime.Format(time.ANSIC), printFilename)
 				}
 			} else {

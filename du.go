@@ -42,28 +42,36 @@ func du(args []string) int {
 		recursive := true
 		includeBase := false
 		mustExist := true
-		existingFiles, err := gd.GetFilesUnderFolder(drivePath, recursive, includeBase,
+		files, err := gd.GetFilesUnderPath(drivePath, recursive, includeBase,
 			mustExist)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "skicka: %v\n", err)
+			fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", drivePath, err)
 			errs++
 			continue
 		}
 
-		// Accumulate the size in bytes of each folder in the hierarchy
+		sorted := files.GetSorted()
+
+		// folderSize keeps track of the size in bytes of each folder in
+		// the hierarchy.
 		folderSize := make(map[string]int64)
+		// dirNames tracks all of the names of directories seen so far.
 		var dirNames []string
 		totalSize := int64(0)
-		for name, f := range existingFiles {
-			if gdrive.IsFolder(f) {
-				dirNames = append(dirNames, name)
+
+		for _, f := range sorted {
+			if gdrive.IsFolder(f.File) {
+				dirNames = append(dirNames, f.Path)
 			} else {
-				totalSize += f.FileSize
-				dirName := filepath.Clean(filepath.Dir(name))
+				// Accumulate the file's contribution to the directory it's
+				// in as well as all of the directories above it.
+				sz := f.File.FileSize
+				totalSize += sz
+				dirName := filepath.Clean(filepath.Dir(f.Path))
 				for ; dirName != "/" && dirName != "."; dirName = filepath.Dir(dirName) {
-					folderSize[dirName] += f.FileSize
+					folderSize[dirName] += sz
 				}
-				folderSize["/"] += f.FileSize
+				folderSize["/"] += sz
 			}
 		}
 

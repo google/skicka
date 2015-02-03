@@ -29,6 +29,7 @@ package gdrive
 import (
 	"bytes"
 	"code.google.com/p/goauth2/oauth"
+	"errors"
 	"fmt"
 	"google.golang.org/api/drive/v2"
 	"google.golang.org/api/googleapi"
@@ -40,6 +41,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -49,22 +51,8 @@ const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
 
 ///////////////////////////////////////////////////////////////////////////
 
-type FileNotFoundError struct {
-	path        string
-	invokingCmd string
-}
-
-func NewFileNotFoundError(path, cmd string) FileNotFoundError {
-	return FileNotFoundError{path: path, invokingCmd: cmd}
-}
-
-func (err FileNotFoundError) Error() string {
-	msg := ""
-	if err.invokingCmd != "" {
-		msg += fmt.Sprintf("%s: ", err.invokingCmd)
-	}
-	return fmt.Sprintf("%s%s: No such file or directory", msg, err.path)
-}
+var ErrNotExist = errors.New("file does not exist")
+var ErrMultipleFiles = errors.New("multiple files on Drive")
 
 // RetryHTTPTransmitError is a small struct to let us detect error cases
 // where the caller should retry the operation, as the error seems to be a
@@ -559,22 +547,94 @@ func (gd *GDrive) GetFile(path string) (*drive.File, error) {
 	return parent, nil
 }
 
-func (gd *GDrive) GetFileInFolder(filename string, folder *drive.File) (*drive.File, error) {
+// GetFiles returns drive.File pointers for *all* of the files in Google
+// Drive that correspond to the given path. Because Google Drive allows
+// multiple files to have the same title (and allows multiple folders of
+// the same name), this is more complicated than it might seen.
+//
+// Note: an error is not returned if the file doesn't exist; the caller
+// should detect that case by detecting a zero-length returned array for
+// that case.
+func (gd *GDrive) GetFiles(path string) ([]*drive.File, error) {
+	root, err := gd.getFileById("root")
+	if err != nil {
+		return nil, fmt.Errorf("unable to get Drive root directory: %v", err)
+	}
+	// Special case the root directory.
+	if path == "/" {
+		files := make([]*drive.File, 1)
+		files[0] = root
+		return files, nil
+	}
+
+	components := strings.Split(path, "/")
+	if components[0] == "" {
+		// The first string in the split is "" if the path starts with a
+		// '/', so skip over that directory component.
+		components = components[1:]
+	}
+	var files []*drive.File
+	err = gd.getFilesRecursive(components, root, &files)
+	return files, err
+}
+
+// Given an array of components of a path relative to the given parent
+// folder, return all of the files under the parent that correspond to the
+// given path.
+func (gd *GDrive) getFilesRecursive(components []string, parent *drive.File,
+	files *[]*drive.File) error {
+	if len(components) == 0 {
+		return nil
+	}
+
 	query := fmt.Sprintf("title='%s' and '%s' in parents and trashed=false",
-		filename, folder.Id)
+		components[0], parent.Id)
+	dirfiles, err := gd.runQuery(query)
+	if err != nil {
+		return err
+	}
+
+	for _, f := range dirfiles {
+		if len(components) == 1 {
+			// We've reached the last component of the path, so have
+			// finally found a matching file.
+			*files = append(*files, f)
+		} else {
+			err = gd.getFilesRecursive(components[1:], f, files)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// GetFilesInFolder returns an array of *drive.File values, one for each
+// file in the given folder with the given name.
+func (gd *GDrive) GetFilesInFolder(name string, folder *drive.File) ([]*drive.File, error) {
+	query := fmt.Sprintf("title='%s' and '%s' in parents and trashed=false",
+		name, folder.Id)
 	files, err := gd.runQuery(query)
 	if err != nil {
 		return nil, err
 	}
 
 	if len(files) == 0 {
-		return nil, FileNotFoundError{
-			path: filename,
-		}
-	} else if len(files) > 1 {
-		return nil, fmt.Errorf("%s: multiple files found", filename)
+		return nil, ErrNotExist
 	}
+	return files, nil
+}
 
+// GetFileInFolder returns a single *drive.File for the given filename in
+// the given folder.  An error is returned if multiple files in that folder
+// all have the same name.
+func (gd *GDrive) GetFileInFolder(name string, folder *drive.File) (*drive.File, error) {
+	files, err := gd.GetFilesInFolder(name, folder)
+	if err != nil {
+		return nil, err
+	} else if len(files) > 1 {
+		return nil, ErrMultipleFiles
+	}
 	return files[0], nil
 }
 
@@ -641,6 +701,133 @@ func (gd *GDrive) GetFilesUnderFolder(path string, recursive, includeBase,
 		existingFiles[path] = file
 	}
 	return existingFiles, nil
+}
+
+// Files represents a cached mapping between pathnames and files stored in
+// Google Drive.
+type Files struct {
+	files map[string][]*drive.File
+}
+
+func newFiles() Files {
+	var f Files
+	f.files = make(map[string][]*drive.File)
+	return f
+}
+
+// Add takes a pathname and a *drive.File and records that the given file
+// lives at the given path in Google Drive.
+func (f Files) Add(path string, df *drive.File) {
+	f.files[path] = append(f.files[path], df)
+}
+
+// GetOne returns a single *drive.File for the given path, if a file with
+// that name exists on Google Drive.  It returns the error ErrNotExist if
+// no such file exists, and ErrMultipleFiles if multiple files with that
+// pathname exist.
+func (f Files) GetOne(path string) (*drive.File, error) {
+	fs, ok := f.files[path]
+	if !ok {
+		return nil, ErrNotExist
+	} else if len(fs) > 1 {
+		return nil, ErrMultipleFiles
+	}
+	return fs[0], nil
+}
+
+// Get returns all of the *drive.Files that are named by the given path.
+// If no such file exists, it returns the ErrNotExist error cod.
+func (f Files) Get(path string) ([]*drive.File, error) {
+	fs, ok := f.files[path]
+	if !ok {
+		return nil, ErrNotExist
+	}
+	return fs, nil
+}
+
+// File represents the mapping between a full path and a single *drive.File
+// stored in Google Drive.
+type File struct {
+	Path string
+	File *drive.File
+}
+
+// Helper declarations to be able to sort an array of File values by
+// pathname.
+type byPath []File
+
+func (a byPath) Len() int           { return len(a) }
+func (a byPath) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a byPath) Less(i, j int) bool { return a[i].Path < a[j].Path }
+
+// GetSorted returns a array of File values, one for each Google Drive file
+// represented by the Files object.  The array is sorted by the files
+// pathnames.
+func (f Files) GetSorted() []File {
+	var files []File
+	for path, fileArray := range f.files {
+		for _, f := range fileArray {
+			files = append(files, File{path, f})
+		}
+	}
+	sort.Sort(byPath(files))
+	return files
+}
+
+// GetFilesUnderPath returns a Files object that represents all of the
+// files stored in GoogleDrive under the given path.  The 'recursive'
+// parameter indicates whether the contents of folders under the given path
+// should be included and 'includeBase' indicates whether the file
+// corresponding to the given path's folder should be included.
+func (gd *GDrive) GetFilesUnderPath(path string,
+	recursive, includeBase, mustExist bool) (Files, error) {
+	files := newFiles()
+
+	// Start by getting the file or files that correspond to the given
+	// path.
+	pathfiles, err := gd.GetFiles(path)
+	if err != nil {
+		return files, err
+	}
+	if len(pathfiles) == 0 && mustExist {
+		return files, ErrNotExist
+	}
+
+	for _, f := range pathfiles {
+		if IsFolder(f) {
+			if includeBase {
+				files.Add(path, f)
+			}
+			err := gd.getFolderContentsRecursive(path, f, recursive, &files)
+			if err != nil {
+				return files, err
+			}
+		} else {
+			files.Add(path, f)
+		}
+	}
+	return files, nil
+}
+
+func (gd *GDrive) getFolderContentsRecursive(path string, parentFolder *drive.File,
+	recursive bool, files *Files) error {
+	query := fmt.Sprintf("trashed=false and '%s' in parents", parentFolder.Id)
+	dirfiles, err := gd.runQuery(query)
+	if err != nil {
+		return err
+	}
+
+	for _, f := range dirfiles {
+		filepath := filepath.Clean(path + "/" + f.Title)
+		files.Add(filepath, f)
+		if IsFolder(f) && recursive {
+			err := gd.getFolderContentsRecursive(filepath, f, recursive, files)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // IsFolder returns a boolean indicating whether the given *drive.File is a

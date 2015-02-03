@@ -50,7 +50,7 @@ func rm(args []string) int {
 	errs := 0
 	for _, path := range drivePaths {
 		if err := checkRmPossible(path, recursive); err != nil {
-			if _, ok := err.(gdrive.FileNotFoundError); ok {
+			if err == gdrive.ErrNotExist {
 				// if there's an encrypted version on drive, let the user know and exit
 				encpath := path + encryptionSuffix
 				if err := checkRmPossible(encpath, recursive); err == nil {
