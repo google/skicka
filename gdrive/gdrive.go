@@ -414,12 +414,25 @@ func (gd *GDrive) handleHTTPResponse(resp *http.Response, err error,
 	return Retry
 }
 
+type addKeyTransport struct {
+	transport http.RoundTripper
+	key       string
+}
+
+func (akt addKeyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.RawQuery != "" {
+		req.URL.RawQuery += "&"
+	}
+	req.URL.RawQuery += "key=" + akt.key
+	return akt.transport.RoundTrip(req)
+}
+
 type loggingTransport struct {
 	transport http.RoundTripper
 	gd        *GDrive
 }
 
-func (lt *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (lt loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	dump, err := httputil.DumpRequestOut(req, false)
 	if err != nil {
 		// Don't report an error back from RoundTrip() just because
@@ -446,9 +459,9 @@ func (lt *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 //
 // Finally, if debug is true, then debugging information will be printed as
 // operations are performed.
-func New(clientId, clientSecret, cacheFile string,
+func New(clientId, clientSecret, apiKey, cacheFile string,
 	uploadBytesPerSecond, downloadBytesPerSecond int,
-	debug func(s string, args ...interface{}), dumphttp bool) (*GDrive, error) {
+	debug func(s string, args ...interface{}), dumpHttp bool) (*GDrive, error) {
 	config := &oauth.Config{
 		ClientId:     clientId,
 		ClientSecret: clientSecret,
@@ -466,12 +479,15 @@ func New(clientId, clientSecret, cacheFile string,
 		uploadBytesPerSecond:   uploadBytesPerSecond,
 		downloadBytesPerSecond: downloadBytesPerSecond,
 	}
-	if dumphttp {
-		gd.oAuthTransport.Transport =
-			&loggingTransport{transport: http.DefaultTransport, gd: &gd}
-	} else {
-		gd.oAuthTransport.Transport = http.DefaultTransport
+
+	transport := http.DefaultTransport
+	if dumpHttp {
+		transport = loggingTransport{transport: transport, gd: &gd}
 	}
+	if apiKey != "" {
+		transport = addKeyTransport{transport: transport, key: apiKey}
+	}
+	gd.oAuthTransport.Transport = transport
 
 	token, err := config.TokenCache.Token()
 	if err != nil {

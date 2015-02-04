@@ -72,6 +72,8 @@ var (
 		Google struct {
 			ClientId     string
 			ClientSecret string
+			// If set, is appended to all http requests via ?key=XXX.
+			ApiKey string
 		}
 		Encryption struct {
 			Salt             string
@@ -114,6 +116,9 @@ var authre = regexp.MustCompile("Authorization: Bearer [^\\s]*")
 func sanitize(s string) string {
 	s = strings.Replace(s, config.Google.ClientId, "[***ClientId***]", -1)
 	s = strings.Replace(s, config.Google.ClientSecret, "[***ClientSecret***]", -1)
+	if config.Google.ApiKey != "" {
+		s = strings.Replace(s, config.Google.ApiKey, "[***ApiKey***]", -1)
+	}
 	s = authre.ReplaceAllLiteralString(s, "Authorization: Bearer [***AuthToken***]")
 	return s
 }
@@ -721,7 +726,7 @@ func main() {
 	}
 
 	gd, err = gdrive.New(config.Google.ClientId, config.Google.ClientSecret,
-		*cachefile, config.Upload.Bytes_per_second_limit,
+		config.Google.ApiKey, *cachefile, config.Upload.Bytes_per_second_limit,
 		config.Download.Bytes_per_second_limit, dpf, *dbg)
 	if err != nil {
 		printErrorAndExit(fmt.Errorf("skicka: error creating Google Drive "+
