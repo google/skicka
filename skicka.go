@@ -367,7 +367,7 @@ func getRandomBytes(n int) []byte {
 func generateKey() {
 	passphrase := os.Getenv(passphraseEnvironmentVariable)
 	if passphrase == "" {
-		printErrorAndExit(fmt.Errorf("skicka: SKICKA_PASSPHRASE " +
+		printErrorAndExit(fmt.Errorf("SKICKA_PASSPHRASE " +
 			"environment variable not set."))
 	}
 
@@ -475,13 +475,12 @@ func checkFatalError(err error, message string) {
 }
 
 func addErrorAndPrintMessage(totalErrors *int32, message string, err error) {
-	fmt.Fprintf(os.Stderr, message+" Error: %s\n", err)
+	fmt.Fprintf(os.Stderr, message+": %s\n", err)
 	atomic.AddInt32(totalErrors, 1)
 }
 
 func printErrorAndExit(err error) {
-	fmt.Fprintf(os.Stderr, "\r") // erase progress bar, if any
-	fmt.Fprintln(os.Stderr, err)
+	fmt.Fprintf(os.Stderr, "\rskicka: %v", err)
 	os.Exit(1)
 }
 
@@ -522,12 +521,11 @@ func createConfigFile(filename string) {
 	if _, err := os.Stat(filename); os.IsNotExist(err) {
 		err := ioutil.WriteFile(filename, []byte(contents), 0600)
 		if err != nil {
-			printErrorAndExit(fmt.Errorf("skicka: unable to create "+
-				"configuration file %s: %v", filename, err))
+			printErrorAndExit(fmt.Errorf("%s: %v", filename, err))
 		}
 		fmt.Printf("skicka: created configuration file %s.\n", filename)
 	} else {
-		printErrorAndExit(fmt.Errorf("skicka: %s: file already exists; "+
+		printErrorAndExit(fmt.Errorf("%s: file already exists; "+
 			"leaving it alone.", filename))
 	}
 }
@@ -581,23 +579,22 @@ func checkConfigValidity() {
 func readConfigFile(filename string) {
 	filename, err := tildeExpand(filename)
 	if err != nil {
-		printErrorAndExit(fmt.Errorf("skicka: %s: error expanding configuration "+
+		printErrorAndExit(fmt.Errorf("%s: error expanding configuration "+
 			"file path: %v", filename, err))
 	}
 
 	if info, err := os.Stat(filename); err != nil {
-		printErrorAndExit(fmt.Errorf("skicka: %v", err))
+		printErrorAndExit(fmt.Errorf("%s: %v", filename, err))
 	} else if goperms := info.Mode() & ((1 << 6) - 1); goperms != 0 {
-		printErrorAndExit(fmt.Errorf("skicka: %s: permissions of configuration file "+
+		printErrorAndExit(fmt.Errorf("%s: permissions of configuration file "+
 			"allow group/other access. Your secrets are at risk.",
 			filename))
 	}
 
 	err = gcfg.ReadFileInto(&config, filename)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", filename, err)
-		printErrorAndExit(fmt.Errorf("skicka: you may want to run \"skicka " +
-			"init\" to create an initial configuration file."))
+		printErrorAndExit(fmt.Errorf("%s: %v. (You may want to run \"skicka "+
+			"init\" to create an initial configuration file.)", filename, err))
 	}
 	checkConfigValidity()
 }
@@ -689,7 +686,7 @@ func main() {
 	var err error
 	*configFilename, err = tildeExpand(*configFilename)
 	if err != nil {
-		printErrorAndExit(fmt.Errorf("skicka: %s: error expanding "+
+		printErrorAndExit(fmt.Errorf("%s: error expanding "+
 			"config path: %v", *cachefile, err))
 	}
 
@@ -710,7 +707,7 @@ func main() {
 
 	*cachefile, err = tildeExpand(*cachefile)
 	if err != nil {
-		printErrorAndExit(fmt.Errorf("skicka: %s: error expanding "+
+		printErrorAndExit(fmt.Errorf("%s: error expanding "+
 			"cachefile path: %v", *cachefile, err))
 	}
 
@@ -729,7 +726,7 @@ func main() {
 		config.Google.ApiKey, *cachefile, config.Upload.Bytes_per_second_limit,
 		config.Download.Bytes_per_second_limit, dpf, *dbg)
 	if err != nil {
-		printErrorAndExit(fmt.Errorf("skicka: error creating Google Drive "+
+		printErrorAndExit(fmt.Errorf("error creating Google Drive "+
 			"client: %v", err))
 	}
 

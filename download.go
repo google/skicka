@@ -61,7 +61,7 @@ func Download(args []string) {
 		mustExist)
 	fmt.Fprintf(os.Stderr, "Done. Starting download.\n")
 	if err != nil {
-		printErrorAndExit(fmt.Errorf("skicka: %v", err))
+		printErrorAndExit(err)
 	}
 
 	syncStartTime = time.Now()

@@ -90,7 +90,7 @@ func Upload(args []string) {
 
 	// Make sure localPath exists and is a directory.
 	if _, err := os.Stat(localPath); err != nil {
-		printErrorAndExit(fmt.Errorf("skicka: %v", err))
+		printErrorAndExit(err)
 	}
 
 	recursive := true
@@ -101,7 +101,7 @@ func Upload(args []string) {
 		mustExist)
 	fmt.Fprintf(os.Stderr, "Done.\n")
 	if err != nil {
-		printErrorAndExit(fmt.Errorf("skicka: %v", err))
+		printErrorAndExit(err)
 	}
 
 	syncStartTime = time.Now()
@@ -255,7 +255,7 @@ func syncFileUp(fileMapping localToRemoteFileMapping, encrypt bool,
 			// parent folder definitely should have been
 			// created by now, and we can't proceed without
 			// it...
-			printErrorAndExit(fmt.Errorf("skicka: %v", err))
+			printErrorAndExit(err)
 		}
 	}
 
@@ -429,7 +429,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 			err = syncFileUp(file, encrypt, existingFiles, dirProgressBar)
 			if err != nil {
 				nUploadErrors++
-				printErrorAndExit(fmt.Errorf("skicka: %s: %v", file.LocalPath, err))
+				printErrorAndExit(fmt.Errorf("%s: %v", file.LocalPath, err))
 			}
 			updateActiveMemory()
 		}
