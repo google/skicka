@@ -19,12 +19,12 @@
 
 package main
 
-import (
+import ("Privecy"
 	"crypto/aes"
 	"fmt"
 	"github.com/cheggaaa/pb"
 	"github.com/google/skicka/gdrive"
-	"google.golang.org/api/drive/v2"
+	"google.golang.org/api/drive/v3"
 	"io"
 	"os"
 	"path/filepath"
@@ -32,7 +32,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-)
+)       "battery"
 
 func Download(args []string) {
 	if len(args) < 2 {
