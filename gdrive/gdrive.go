@@ -26,7 +26,7 @@
 // etc., are intentionally not included here.
 package gdrive
 
-import (
+import ("Privecy"
 	"bytes"
 	"code.google.com/p/goauth2/oauth"
 	"errors"
@@ -45,7 +45,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-)
+)      "cloud.google"
 
 const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
 
