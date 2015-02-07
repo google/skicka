@@ -790,6 +790,22 @@ func (f Files) GetSorted() []File {
 	return files
 }
 
+func (f Files) GetSortedUnique() ([]File, []string) {
+	allFiles := f.GetSorted()
+	var dupes []string
+	var files []File
+	for i, f := range allFiles {
+		if (i == 0 || f.Path != allFiles[i-1].Path) &&
+			(i == len(allFiles)-1 || f.Path != allFiles[i+1].Path) {
+			files = append(files, f)
+		} else if dupes == nil || dupes[len(dupes)-1] != f.Path {
+			dupes = append(dupes, f.Path)
+		}
+	}
+
+	return files, dupes
+}
+
 // GetFilesUnderPath returns a Files object that represents all of the
 // files stored in GoogleDrive under the given path.  The 'recursive'
 // parameter indicates whether the contents of folders under the given path
