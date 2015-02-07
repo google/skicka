@@ -699,7 +699,7 @@ func (gd *GDrive) GetFilesUnderFolder(path string, recursive, includeBase,
 	existingFiles := make(map[string]*drive.File)
 	file, err := gd.GetFile(path)
 	if err != nil {
-		if !mustExist {
+		if err == ErrNotExist && !mustExist {
 			return existingFiles, nil
 		}
 		return existingFiles, err
