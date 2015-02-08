@@ -65,12 +65,18 @@ func (bcr *byteCountingReader) Read(dst []byte) (int, error) {
 	return read, err
 }
 
-func Upload(args []string) {
+func uploadUsage() {
+	fmt.Printf("Usage: skicka upload [-ignore-times] local_path drive_path\n")
+	fmt.Printf("Run \"skicka help\" for more detailed help text.\n")
+}
+
+func upload(args []string) int {
 	ignoreTimes := false
 	encrypt := false
 
 	if len(args) < 2 {
-		printUsageAndExit()
+		uploadUsage()
+		return 1
 	}
 
 	i := 0
@@ -104,6 +110,9 @@ func Upload(args []string) {
 		printErrorAndExit(err)
 	}
 
+	// FIXME: get from sync up...
+	errs := 0
+
 	syncStartTime = time.Now()
 	err = syncHierarchyUp(localPath, drivePath, existingFiles, encrypt,
 		ignoreTimes)
@@ -114,8 +123,9 @@ func Upload(args []string) {
 
 	printFinalStats()
 	if err != nil {
-		os.Exit(1)
+		errs++
 	}
+	return errs
 }
 
 // Representation of a local file that may need to be synced up to Drive.
@@ -381,7 +391,6 @@ func syncHierarchyUp(localPath string, driveRoot string,
 
 	fileMappings, err := compileUploadFileTree(localPath, driveRoot, encrypt)
 	checkFatalError(err, "error getting local filetree")
-	timeDelta("Walk local directories")
 	fileMappings, err = filterFilesToUpload(fileMappings, existingFiles, encrypt,
 		ignoreTimes)
 	checkFatalError(err, "error determining files to sync")
@@ -434,7 +443,6 @@ func syncHierarchyUp(localPath string, driveRoot string,
 			updateActiveMemory()
 		}
 		dirProgressBar.Finish()
-		timeDelta("Create Google Drive directories")
 	}
 
 	fileProgressBar := pb.New64(nBytesToUpload).SetUnits(pb.U_BYTES)
@@ -546,8 +554,6 @@ func syncHierarchyUp(localPath string, driveRoot string,
 		<-doneChan
 	}
 	fileProgressBar.Finish()
-
-	timeDelta("Sync files")
 
 	if nUploadErrors == 0 {
 		return nil

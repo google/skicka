@@ -29,7 +29,7 @@ import (
 )
 
 func mkdirUsage() {
-	fmt.Printf("Usage: skicka mkdir [-p] <drive path...>\n")
+	fmt.Printf("Usage: skicka mkdir [-p] drive_path ...\n")
 	fmt.Printf("Run \"skicka help\" for more detailed help text.\n")
 	os.Exit(1)
 }

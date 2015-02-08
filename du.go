@@ -29,9 +29,7 @@ import (
 
 func du(args []string) int {
 	if len(args) == 0 {
-		fmt.Printf("Usage: skicka du <drive path...>\n")
-		fmt.Printf("Run \"skicka help\" for more detailed help text.\n")
-		return 1
+		args = append(args, "/")
 	}
 
 	errs := 0

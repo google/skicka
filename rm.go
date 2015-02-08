@@ -42,7 +42,7 @@ func rm(args []string) int {
 
 	if len(drivePaths) == 0 {
 		fmt.Printf("rm: drive path cannot be empty.\n")
-		fmt.Printf("Usage: rm [-r, -s] <drive path ...>\n")
+		fmt.Printf("Usage: rm [-r, -s] drive_path ...\n")
 		fmt.Printf("Run \"skicka help\" for more detailed help text.\n")
 		return 1
 	}

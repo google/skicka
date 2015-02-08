@@ -50,6 +50,7 @@ import (
 const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
 const encryptionSuffix = ".aes256"
 const resumableUploadMinSize = 64 * 1024 * 1024
+const passphraseEnvironmentVariable = "SKICKA_PASSPHRASE"
 
 ///////////////////////////////////////////////////////////////////////////
 // Global Variables
@@ -91,8 +92,8 @@ var (
 	}
 
 	// Various statistics gathered along the way. These all should be
-	// updated using atomic operations since we generally have multiple
-	// threads working concurrently for uploads and downloads.
+	// updated using atomic operations since we often have multiple threads
+	// working concurrently for uploads and downloads.
 	stats struct {
 		DiskReadBytes     int64
 		DiskWriteBytes    int64
@@ -101,8 +102,6 @@ var (
 		LocalFilesUpdated int64
 		DriveFilesUpdated int64
 	}
-
-	passphraseEnvironmentVariable = "SKICKA_PASSPHRASE"
 )
 
 ///////////////////////////////////////////////////////////////////////////
@@ -136,41 +135,17 @@ func (d debugging) Printf(format string, args ...interface{}) {
 	}
 }
 
-type CommandSyntaxError struct {
-	Cmd string
-	Msg string
-}
-
-func (c CommandSyntaxError) Error() string {
-	return fmt.Sprintf("%s syntax error: %s", c.Cmd, c.Msg)
-}
-
 ///////////////////////////////////////////////////////////////////////////
 // Small utility functions
 
-var lastTimeDelta = time.Now()
-
-// If debugging output is enabled, prints the elapsed time between the last
-// call to timeDelta() (or program start, if it hasn't been called before),
-// and the current call to timeDelta().
-func timeDelta(event string) {
-	now := time.Now()
-	debug.Printf("Time [%s]: %s", event, now.Sub(lastTimeDelta).String())
-	lastTimeDelta = now
-}
-
 // If the given path starts with a tilde, performs shell glob expansion
-// to convert it to the path of the home directory. Otherwise returns the
-// path unchanged.
-func tildeExpand(path string) (string, error) {
+// to convert it to the path of the home directory.
+func tildeExpand(path string) string {
 	path = filepath.Clean(path)
 	if path[:2] == "~/" {
 		usr, err := user.Current()
-		if err != nil {
-			return path, err
-		}
-		homedir := usr.HomeDir
-		return strings.Replace(path, "~", homedir, 1), nil
+		checkFatalError(err, "couldn't get current user")
+		return strings.Replace(path, "~", usr.HomeDir, 1)
 	} else if path[:1] == "~" {
 		slashindex := strings.Index(path, "/")
 		var username string
@@ -180,13 +155,10 @@ func tildeExpand(path string) (string, error) {
 			username = path[1:slashindex]
 		}
 		usr, err := user.Lookup(username)
-		if err != nil {
-			return path, err
-		}
-		homedir := usr.HomeDir
-		return homedir + path[slashindex:], nil
+		checkFatalError(err, fmt.Sprintf("%s: couldn't lookup user", username))
+		return usr.HomeDir + path[slashindex:]
 	} else {
-		return path, nil
+		return path
 	}
 }
 
@@ -195,9 +167,7 @@ func tildeExpand(path string) (string, error) {
 // sure the strings in the config file are reasonable.)
 func decodeHexString(s string) []byte {
 	r, err := hex.DecodeString(s)
-	if err != nil {
-		log.Fatalf("unable to decode hex string: %v", err)
-	}
+	checkFatalError(err, "unable to decode hex string")
 	return r
 }
 
@@ -278,9 +248,9 @@ func printFinalStats() {
 	defer statsMutex.Unlock()
 
 	syncTime := time.Now().Sub(syncStartTime)
-	fmt.Printf("skicka: preparation time %s, sync time %s\n",
+	fmt.Printf("skicka: Preparation time %s, sync time %s\n",
 		fmtDuration(syncStartTime.Sub(startTime)), fmtDuration(syncTime))
-	fmt.Printf("skicka: updated %d Drive files, %d local files\n",
+	fmt.Printf("skicka: Updated %d Drive files, %d local files\n",
 		stats.DriveFilesUpdated, stats.LocalFilesUpdated)
 	fmt.Printf("skicka: %s read from disk, %s written to disk\n",
 		fmtbytes(stats.DiskReadBytes, false),
@@ -312,15 +282,14 @@ func encryptBytes(key []byte, iv []byte, plaintext []byte) []byte {
 // using the given key and initialization vector.
 func makeEncrypterReader(key []byte, iv []byte, reader io.Reader) io.Reader {
 	if key == nil {
-		log.Fatalf("uninitialized key in makeEncrypterReader()")
+		printErrorAndExit(fmt.Errorf("uninitialized key in makeEncrypterReader()"))
 	}
 	block, err := aes.NewCipher(key)
-	if err != nil {
-		log.Fatalf("unable to create AES cypher: %v", err)
-	}
+	checkFatalError(err, "unable to create AES cypher")
+
 	if len(iv) != aes.BlockSize {
-		log.Fatalf("IV length %d != aes.BlockSize %d", len(iv),
-			aes.BlockSize)
+		printErrorAndExit(fmt.Errorf("IV length %d != aes.BlockSize %d", len(iv),
+			aes.BlockSize))
 	}
 
 	stream := cipher.NewCFBEncrypter(block, iv)
@@ -336,15 +305,14 @@ func decryptBytes(key []byte, iv []byte, ciphertext []byte) []byte {
 
 func makeDecryptionReader(key []byte, iv []byte, reader io.Reader) io.Reader {
 	if key == nil {
-		log.Fatalf("uninitialized key in makeDecryptionReader()")
+		printErrorAndExit(fmt.Errorf("uninitialized key in makeDecryptionReader()"))
 	}
 	block, err := aes.NewCipher(key)
-	if err != nil {
-		log.Fatalf("unable to create AES cypher: %v", err)
-	}
+	checkFatalError(err, "unable to create AES cypher")
+
 	if len(iv) != aes.BlockSize {
-		log.Fatalf("IV length %d != aes.BlockSize %d", len(iv),
-			aes.BlockSize)
+		printErrorAndExit(fmt.Errorf("IV length %d != aes.BlockSize %d", len(iv),
+			aes.BlockSize))
 	}
 
 	stream := cipher.NewCFBDecrypter(block, iv)
@@ -355,9 +323,8 @@ func makeDecryptionReader(key []byte, iv []byte, reader io.Reader) io.Reader {
 // cryptographically-strong random number source.
 func getRandomBytes(n int) []byte {
 	bytes := make([]byte, n)
-	if _, err := io.ReadFull(rand.Reader, bytes); err != nil {
-		log.Fatalf("unable to get random bytes: %v", err)
-	}
+	_, err := io.ReadFull(rand.Reader, bytes)
+	checkFatalError(err, "unable to get random bytes")
 	return bytes
 }
 
@@ -367,8 +334,8 @@ func getRandomBytes(n int) []byte {
 func generateKey() {
 	passphrase := os.Getenv(passphraseEnvironmentVariable)
 	if passphrase == "" {
-		printErrorAndExit(fmt.Errorf("SKICKA_PASSPHRASE " +
-			"environment variable not set."))
+		printErrorAndExit(fmt.Errorf(passphraseEnvironmentVariable +
+			" environment variable not set."))
 	}
 
 	// Derive a 64-byte hash from the passphrase using PBKDF2 with 65536
@@ -376,7 +343,7 @@ func generateKey() {
 	salt := getRandomBytes(32)
 	hash := pbkdf2.Key([]byte(passphrase), salt, 65536, 64, sha256.New)
 	if len(hash) != 64 {
-		log.Fatalf("incorrect key size returned by pbkdf2 %d", len(hash))
+		printErrorAndExit(fmt.Errorf("incorrect key size returned by pbkdf2 %d", len(hash)))
 	}
 
 	// We'll store the first 32 bytes of the hash to use to confirm the
@@ -404,7 +371,7 @@ func generateKey() {
 // and the user's passphrase.
 func decryptEncryptionKey() ([]byte, error) {
 	if key != nil {
-		log.Fatalf("key aready decrypted!")
+		panic("key aready decrypted!")
 	}
 
 	salt := decodeHexString(config.Encryption.Salt)
@@ -414,8 +381,8 @@ func decryptEncryptionKey() ([]byte, error) {
 
 	passphrase := os.Getenv(passphraseEnvironmentVariable)
 	if passphrase == "" {
-		return nil, fmt.Errorf("SKICKA_PASSPHRASE environment " +
-			"variable not set")
+		return nil, fmt.Errorf(passphraseEnvironmentVariable +
+			" environment variable not set")
 	}
 
 	derivedKey := pbkdf2.Key([]byte(passphrase), salt, 65536, 64, sha256.New)
@@ -504,6 +471,8 @@ func createConfigFile(filename string) {
 [google]
 	clientid=YOUR_GOOGLE_APP_CLIENT_ID
 	clientsecret=YOUR_GOOGLE_APP_SECRET
+    ;An API key may optionally be provided.
+    ;apikey=YOUR_API_KEY
 [encryption]
         ; Run 'skicka genkey' to generate an encyption key.
 	;salt=
@@ -581,11 +550,7 @@ func checkConfigValidity() {
 }
 
 func readConfigFile(filename string) {
-	filename, err := tildeExpand(filename)
-	if err != nil {
-		printErrorAndExit(fmt.Errorf("%s: error expanding configuration "+
-			"file path: %v", filename, err))
-	}
+	filename = tildeExpand(filename)
 
 	if info, err := os.Stat(filename); err != nil {
 		printErrorAndExit(fmt.Errorf("%s: %v", filename, err))
@@ -595,7 +560,7 @@ func readConfigFile(filename string) {
 			filename))
 	}
 
-	err = gcfg.ReadFileInto(&config, filename)
+	err := gcfg.ReadFileInto(&config, filename)
 	if err != nil {
 		printErrorAndExit(fmt.Errorf("%s: %v. (You may want to run \"skicka "+
 			"init\" to create an initial configuration file.)", filename, err))
@@ -612,16 +577,18 @@ usage: skicka [common options] <command> [command options]
 
 Commands and their options are:
   cat        Print the contents of the Google Drive file to standard output.
-             Arguments: <gdrive path ...>
+             Arguments: drive_path ...
 
-  download   Recursively download all files from a Google Drive folder to a
-             local directory. If a local file already exists and has the same
-             contents as the corresponding Google Drive file, the download is
-             skipped.
-             Arguments: [-ignore-times] <drive path> <local directory> 
+  download   Recursively download either a single file, or all files from a
+             Google Drive folder to a local directory. If the corresponding
+             local file already exists and has the same contents as the its
+             Google Drive file, the download is skipped.
+             Arguments: [-ignore-times] drive_path local_path
 
   du         Print the space used by the Google Drive folder and its children.
-             Arguments: <drive path ...>
+             Arguments: [drive_path ...]
+
+  help       Print this help text.
 
   genkey     Generate a new key for encrypting files.
 
@@ -630,19 +597,19 @@ Commands and their options are:
              configuration file for details.)
 
   ls         List the files and directories in the given Google Drive folder.
-             Arguments: [-l, -ll, -r] <drive path ...>,
+             Arguments: [-l, -ll, -r] [drive_path ...],
              where -l and -ll specify long (including sizes and update times)
              and really long output (also including MD5 checksums), respectively.
              The -r argument causes ls to recursively list all files in the
              hierarchy rooted at the base directory.
 
   mkdir      Create a new directory (folder) at the given Google Drive path.
-             Arguments: [-p] <drive path>,
+             Arguments: [-p] drive_path ...,
              where intermediate directories in the path are created if -p is
              specified.
 
   rm	     Remove a file or directory at the given Google Drive path.
-             Arguments: [-r, -s] <drive path ...>,
+             Arguments: [-r, -s] drive_path ...,
              where files and directories are recursively removed if -r is specified
              and the google drive trash is skipped if -s is specified. The default 
              behavior is to fail if the drive path specified is a directory and -r is
@@ -652,7 +619,7 @@ Commands and their options are:
   upload     Uploads all files in the local directory and its children to the
              given Google Drive path. Skips files that have already been
              uploaded.
-             Arguments: [-ignore-times] [-encrypt] <local directory> <drive path>
+             Arguments: [-ignore-times] [-encrypt] local_path drive_path
 
 Options valid for both "upload" and "download":
   -ignore-times    Normally, skicka assumes that if the timestamp of a local file
@@ -664,10 +631,15 @@ Options valid for both "upload" and "download":
 General options valid for all commands:
   -config=<filename>     Specify a configuration file. Default: ~/.skicka.config.
   -debug                 Enable debugging output.
-  -help                  Print this help message.
   -tokencache=<filename> OAuth2 token cache file. Default: ~/.skicka.tokencache.json.
   -verbose               Enable verbose output.
 `)
+}
+
+func shortUsage() {
+	fmt.Fprintf(os.Stderr, "usage: skicka "+
+		"[cat,download,du,genkey,help,init,ls,mkdir,rm,upload] ...\n")
+	fmt.Fprintf(os.Stderr, "Run \"skicka help\" for more detailed help text.\n")
 }
 
 func main() {
@@ -681,18 +653,15 @@ func main() {
 	flag.Parse()
 
 	if len(flag.Args()) == 0 {
-		printUsageAndExit()
+		shortUsage()
+		os.Exit(0)
 	}
 
 	debug = debugging(*dbg)
 	verbose = debugging(*vb || bool(debug))
 
 	var err error
-	*configFilename, err = tildeExpand(*configFilename)
-	if err != nil {
-		printErrorAndExit(fmt.Errorf("%s: error expanding "+
-			"config path: %v", *cachefile, err))
-	}
+	*configFilename = tildeExpand(*configFilename)
 
 	cmd := flag.Arg(0)
 	// Commands that don't need the config file to be read or to use
@@ -709,16 +678,12 @@ func main() {
 		return
 	}
 
-	*cachefile, err = tildeExpand(*cachefile)
-	if err != nil {
-		printErrorAndExit(fmt.Errorf("%s: error expanding "+
-			"cachefile path: %v", *cachefile, err))
-	}
+	*cachefile = tildeExpand(*cachefile)
 
 	readConfigFile(*configFilename)
 
-	// Set the appropriate callback function for the GDrive object to use
-	// for debugging output.
+	// Choose the appropriate callback function for the GDrive object to
+	// use for debugging output.
 	var dpf func(s string, args ...interface{})
 	if debug {
 		dpf = debugPrint
@@ -747,13 +712,14 @@ func main() {
 	case "mkdir":
 		errs = mkdir(args)
 	case "upload":
-		Upload(args)
+		errs = upload(args)
 	case "download":
 		errs = download(args)
 	case "rm":
 		errs = rm(args)
 	default:
-		printUsageAndExit()
+		shortUsage()
+		errs = 1
 	}
 	os.Exit(errs)
 }

@@ -73,7 +73,7 @@ func ls(args []string) int {
 		} else if arg == "-r" {
 			recursive = true
 		} else if arg[0] == '-' {
-			fmt.Printf("Usage: skicka ls [-l,-ll,-r] <drive path...>\n")
+			fmt.Printf("Usage: skicka ls [-l,-ll,-r] [drive_path ...]\n")
 			fmt.Printf("Run \"skicka help\" for more detailed help text.\n")
 			return 1
 		} else {

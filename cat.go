@@ -29,7 +29,7 @@ import (
 
 func cat(args []string) int {
 	if len(args) == 0 {
-		fmt.Printf("Usage: skicka cat <drive path...>\n")
+		fmt.Printf("Usage: skicka cat drive_path ...\n")
 		fmt.Printf("Run \"skicka help\" for more detailed help text.\n")
 		return 1
 	}
