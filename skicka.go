@@ -470,12 +470,16 @@ func getPermissions(driveFile *drive.File) (os.FileMode, error) {
 
 func checkFatalError(err error, message string) {
 	if err != nil {
-		printErrorAndExit(fmt.Errorf(message, err))
+		if message != "" {
+			printErrorAndExit(fmt.Errorf("%s: %v", message, err))
+		} else {
+			printErrorAndExit(err)
+		}
 	}
 }
 
 func addErrorAndPrintMessage(totalErrors *int32, message string, err error) {
-	fmt.Fprintf(os.Stderr, message+": %s\n", err)
+	fmt.Fprintf(os.Stderr, "skicka: "+message+": %s\n", err)
 	atomic.AddInt32(totalErrors, 1)
 }
 
@@ -745,7 +749,7 @@ func main() {
 	case "upload":
 		Upload(args)
 	case "download":
-		Download(args)
+		errs = download(args)
 	case "rm":
 		errs = rm(args)
 	default:

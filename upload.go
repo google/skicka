@@ -380,11 +380,11 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	}
 
 	fileMappings, err := compileUploadFileTree(localPath, driveRoot, encrypt)
-	checkFatalError(err, "skicka: error getting local filetree: %v")
+	checkFatalError(err, "error getting local filetree")
 	timeDelta("Walk local directories")
 	fileMappings, err = filterFilesToUpload(fileMappings, existingFiles, encrypt,
 		ignoreTimes)
-	checkFatalError(err, "skicka: error determining files to sync: %v")
+	checkFatalError(err, "error determining files to sync")
 
 	if len(fileMappings) == 0 {
 		fmt.Fprintln(os.Stderr,
