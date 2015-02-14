@@ -1315,7 +1315,8 @@ func (gd *GDrive) UploadFileContentsResumable(driveFile *drive.File,
 
 		if resp != nil {
 			googleapi.CloseBody(resp)
-		} else if status == Fail {
+		}
+		if status == Fail {
 			return err
 		} else if status == Success {
 			// The entire file has been uploaded successfully.
