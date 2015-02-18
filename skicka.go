@@ -670,7 +670,7 @@ General options valid for all commands:
 }
 
 func main() {
-	cachefile := flag.String("cache", "~/.skicka.tokencache.json",
+	cachefile := flag.String("tokencache", "~/.skicka.tokencache.json",
 		"OAuth2 token cache file")
 	configFilename := flag.String("config", "~/.skicka.config",
 		"Configuration file")
