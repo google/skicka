@@ -658,10 +658,49 @@ func filterFilesToUpload(fileMappings []localToRemoteFileMapping,
 	return toUpload, nil
 }
 
-func compileUploadFileTree(localPath, driveRoot string, encrypt bool) ([]localToRemoteFileMapping, error) {
+func shouldSkipUpload(path string, info os.FileInfo) bool {
+	// Check to see if the filename matches one of the regular expressions
+	// of files to ignore.
+	for _, re := range config.Upload.Ignored_Regexp {
+		match, err := regexp.MatchString(re, path)
+		if match == true {
+			fmt.Fprintf(os.Stderr, "skicka: ignoring file %s, which "+
+				"matches regexp \"%s\".\n", path, re)
+			return true
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "skicka: %s: %s", path, err)
+			return true
+		}
+	}
+
+	if (info.Mode() & os.ModeSymlink) != 0 {
+		fmt.Fprintf(os.Stderr, "skicka: ignoring symlink \"%s\".\n", path)
+		return true
+	}
+
+	return false
+}
+
+func compileUploadFileTree(localPath, drivePath string,
+	encrypt bool) ([]localToRemoteFileMapping, error) {
 	// Walk the local directory hierarchy starting at 'localPath' and build
 	// an array of files that may need to be synchronized.
 	var fileMappings []localToRemoteFileMapping
+
+	// If we're just uploading a single file, some of the details are
+	// different...
+	if stat, err := os.Stat(localPath); err == nil && stat.IsDir() == false {
+		if !shouldSkipUpload(localPath, stat) {
+			driveFile, err := gd.GetFile(drivePath)
+			if err == nil && gdrive.IsFolder(driveFile) {
+				drivePath = filepath.Join(drivePath, filepath.Base(localPath))
+			}
+			fileMappings = append(fileMappings,
+				localToRemoteFileMapping{localPath, drivePath, stat})
+			return fileMappings, nil
+		}
+	}
 
 	walkFuncCallback := func(path string, info os.FileInfo, patherr error) error {
 		path = filepath.Clean(path)
@@ -670,22 +709,7 @@ func compileUploadFileTree(localPath, driveRoot string, encrypt bool) ([]localTo
 			return nil
 		}
 
-		// Check to see if the filename matches one of the regular
-		// expressions of files to ignore.
-		for _, re := range config.Upload.Ignored_Regexp {
-			match, err := regexp.MatchString(re, path)
-			if match == true {
-				fmt.Printf("skicka: ignoring file %s, which "+
-					"matches regexp \"%s\".\n", path, re)
-				return nil
-			}
-			if err != nil {
-				return err
-			}
-		}
-
-		if (info.Mode() & os.ModeSymlink) != 0 {
-			fmt.Printf("skicka: ignoring symlink \"%s\".\n", path)
+		if shouldSkipUpload(path, info) {
 			return nil
 		}
 
@@ -695,7 +719,7 @@ func compileUploadFileTree(localPath, driveRoot string, encrypt bool) ([]localTo
 		if err != nil {
 			return err
 		}
-		drivePath := filepath.Clean(driveRoot + "/" + relPath)
+		drivePath := filepath.Clean(drivePath + "/" + relPath)
 		if info.IsDir() == false && encrypt == true {
 			drivePath += encryptionSuffix
 		}
