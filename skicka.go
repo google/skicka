@@ -113,8 +113,12 @@ var authre = regexp.MustCompile("Authorization: Bearer [^\\s]*")
 // values from debugging output so that it can be shared without also
 // compromising the login credentials, etc.
 func sanitize(s string) string {
-	s = strings.Replace(s, config.Google.ClientId, "[***ClientId***]", -1)
-	s = strings.Replace(s, config.Google.ClientSecret, "[***ClientSecret***]", -1)
+	if config.Google.ClientId != "" {
+		s = strings.Replace(s, config.Google.ClientId, "[***ClientId***]", -1)
+	}
+	if config.Google.ClientSecret != "" {
+		s = strings.Replace(s, config.Google.ClientSecret, "[***ClientSecret***]", -1)
+	}
 	if config.Google.ApiKey != "" {
 		s = strings.Replace(s, config.Google.ApiKey, "[***ApiKey***]", -1)
 	}
