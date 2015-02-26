@@ -152,7 +152,7 @@ func (l2r localToRemoteBySize) Less(i, j int) bool {
 // examine the local file contents further to see if an upload is required
 // (unless the -ignore-times flag has been used).
 func fileMetadataMatches(info os.FileInfo, encrypt bool,
-	driveFile *drive.File) (bool, error) {
+	driveFile *drive.File) (bool, bool, error) {
 	localSize := info.Size()
 	driveSize := driveFile.FileSize
 	if encrypt {
@@ -161,14 +161,11 @@ func fileMetadataMatches(info os.FileInfo, encrypt bool,
 		// comparing the file sizes.
 		driveSize -= aes.BlockSize
 	}
-	if localSize != driveSize {
-		// File sizes mismatch; update needed.
-		return false, nil
-	}
+	sizeMatches := localSize == driveSize
 
 	driveTime, err := gdrive.GetModificationTime(driveFile)
 	if err != nil {
-		return true, err
+		return sizeMatches, false, err
 	}
 
 	// Finally, check if the local modification time is different than the
@@ -176,7 +173,7 @@ func fileMetadataMatches(info os.FileInfo, encrypt bool,
 	// if it is, we return false and an upload will be done..
 	localTime := info.ModTime()
 	debug.Printf("localTime: %v, driveTime: %v", localTime, driveTime)
-	return localTime.Equal(driveTime), nil
+	return sizeMatches, localTime.Equal(driveTime), nil
 }
 
 // Return the md5 hash of the file at the given path in the form of a
@@ -596,22 +593,36 @@ func filterFilesToUpload(fileMappings []localToRemoteFileMapping,
 					return nil, err
 				}
 				if !t.Equal(file.LocalFileInfo.ModTime()) {
-					if err := gd.UpdateModificationTime(driveFile, file.LocalFileInfo.ModTime()); err != nil {
+					if err := gd.UpdateModificationTime(driveFile,
+						file.LocalFileInfo.ModTime()); err != nil {
 						return nil, err
 					}
 				}
 				continue
 			}
 
-			// Do superficial checking on the files
-			metadataMatches, err := fileMetadataMatches(file.LocalFileInfo, encrypt, driveFile)
+			// Compare the things we can do quickly (sizes, times).
+			sizeMatches, timeMatches, err := fileMetadataMatches(file.LocalFileInfo, encrypt,
+				driveFile)
 
 			if err != nil {
 				return nil, err
-			} else if metadataMatches && !ignoreTimes {
+			}
+
+			if sizeMatches == false {
+				debug.Printf("size mismatch; adding file %s to upload list",
+					file.LocalPath)
+				toUpload = append(toUpload, file)
+				continue
+			} else if timeMatches == true && !ignoreTimes {
+				debug.Printf("metadata matches; skipping upload of %s",
+					file.LocalPath)
 				continue
 			}
 
+			// The file sizes match and either the modification times
+			// differ or they're the same but we don't trust them.
+			// Therefore, we'll compare MD5 checksums of file contents.
 			var iv []byte
 			if encrypt {
 				iv, err = getInitializationVector(driveFile)
@@ -627,30 +638,33 @@ func filterFilesToUpload(fileMappings []localToRemoteFileMapping,
 			}
 
 			contentsMatch := md5contents == driveFile.Md5Checksum
-			if contentsMatch {
-				// The timestamp of the local file is different, but the contents
-				// are unchanged versus what's on Drive, so just update the
-				// modified time on Drive so that we don't keep checking this
-				// file.
-				debug.Printf("contents match, timestamps do not")
-				if err := gd.UpdateModificationTime(driveFile, file.LocalFileInfo.ModTime()); err != nil {
-					return nil, err
-				}
-			} else if metadataMatches == true {
-				// We're running with -ignore-times, the modification times
-				// matched, but the file contents were different. This is both
-				// surprising and disturbing; it specifically suggests that
-				// either the file contents were modified without the file's
-				// modification time being updated, or that there was file
-				// corruption of some sort. We'll be conservative and not clobber
-				// the Drive file in case it was the latter.
-				return nil, fmt.Errorf("has different contents versus Google " +
-					"Drive, but doesn't have a newer timestamp. **Not updating" +
-					"the file on Drive**. Run 'touch' to update the file" +
-					"modification time and re-run skicka if you do want to" +
-					"update the file.")
-			} else {
+			if contentsMatch == false {
 				toUpload = append(toUpload, file)
+			} else {
+				if timeMatches == false {
+					// The timestamp of the local file is different, but the contents
+					// are unchanged versus what's on Drive, so just update the
+					// modified time on Drive so that we don't keep checking this
+					// file.
+					debug.Printf("contents match, timestamps do not")
+					if err := gd.UpdateModificationTime(driveFile,
+						file.LocalFileInfo.ModTime()); err != nil {
+						return nil, err
+					}
+				} else {
+					// We're running with -ignore-times, the modification times
+					// matched, but the file contents were different. This is both
+					// surprising and disturbing; it specifically suggests that
+					// either the file contents were modified without the file's
+					// modification time being updated, or that there was file
+					// corruption of some sort. We'll be conservative and not clobber
+					// the Drive file in case it was the latter.
+					return nil, fmt.Errorf("has different contents versus Google " +
+						"Drive, but doesn't have a newer timestamp. **Not updating" +
+						"the file on Drive**. Run 'touch' to update the file" +
+						"modification time and re-run skicka if you do want to" +
+						"update the file.")
+				}
 			}
 		}
 	}
