@@ -91,6 +91,7 @@ func upload(args []string) int {
 			return 1
 		}
 	}
+	trustTimes := !ignoreTimes
 
 	localPath := filepath.Clean(args[i])
 	drivePath := filepath.Clean(args[i+1])
@@ -104,28 +105,18 @@ func upload(args []string) int {
 	includeBase := true
 	mustExist := false
 	fmt.Fprintf(os.Stderr, "skicka: Getting list of files to upload... ")
-	existingFiles, err := gd.GetFilesUnderFolder(drivePath, recursive, includeBase,
+	files, err := gd.GetFilesUnderPath(drivePath, recursive, includeBase,
 		mustExist)
 	fmt.Fprintf(os.Stderr, "Done.\n")
 	if err != nil {
 		printErrorAndExit(err)
 	}
 
-	// FIXME: get from sync up...
-	errs := 0
-
 	syncStartTime = time.Now()
-	err = syncHierarchyUp(localPath, drivePath, existingFiles, encrypt,
-		ignoreTimes)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: error uploading %s: %v\n",
-			localPath, err)
-	}
+	errs := syncHierarchyUp(localPath, drivePath, files, encrypt,
+		trustTimes)
 
 	printFinalStats()
-	if err != nil {
-		errs++
-	}
 	return errs
 }
 
@@ -242,11 +233,9 @@ func getFileContentsReaderForUpload(path string, encrypt bool,
 // Besides being sent up to Google Drive, the file is tee'd (via io.Tee)
 // into an optional writer variable.  This variable can safely be nil.
 func syncFileUp(fileMapping localToRemoteFileMapping, encrypt bool,
-	existingDriveFiles map[string]*drive.File, pb *pb.ProgressBar) error {
-	debug.Printf("syncFileUp: %#v", fileMapping.LocalFileInfo)
-
+	files gdrive.Files, pb *pb.ProgressBar) error {
 	// We need to create the file or folder on Google Drive.
-	var err error
+	debug.Printf("syncFileUp: %#v", fileMapping.LocalFileInfo)
 
 	// Get the *drive.File for the folder to create the new file in.
 	// This folder should definitely exist at this point, since we
@@ -255,16 +244,13 @@ func syncFileUp(fileMapping localToRemoteFileMapping, encrypt bool,
 	if dirPath == "." {
 		dirPath = "/"
 	}
-	parentFile, ok := existingDriveFiles[dirPath]
-	if !ok {
+	parentFile, err := files.GetOne(dirPath)
+	if err != nil {
 		parentFile, err = gd.GetFile(dirPath)
-		if err != nil {
-			// We can't really recover at this point; the
-			// parent folder definitely should have been
-			// created by now, and we can't proceed without
-			// it...
-			printErrorAndExit(err)
-		}
+		// We can't really recover at this point; the parent folder
+		// definitely should have been created by now, and we can't proceed
+		// without it...
+		checkFatalError(err, "get parent directory")
 	}
 
 	baseName := filepath.Base(fileMapping.RemotePath)
@@ -293,9 +279,9 @@ func syncFileUp(fileMapping localToRemoteFileMapping, encrypt bool,
 		// another session, this map may become stale; we don't
 		// explicitly look out for this and will presumably error out
 		// in interesting ways if it does happen.
-		existingDriveFiles[fileMapping.RemotePath] = driveFile
+		files.Add(fileMapping.RemotePath, driveFile)
 	} else {
-		if driveFile, ok = existingDriveFiles[fileMapping.RemotePath]; !ok {
+		if driveFile, err = files.GetOne(fileMapping.RemotePath); err == gdrive.ErrNotExist {
 			driveFile, err = createDriveFile(baseName,
 				fileMapping.LocalFileInfo.Mode(),
 				fileMapping.LocalFileInfo.ModTime(), encrypt, parentFile)
@@ -378,25 +364,22 @@ func syncFileUp(fileMapping localToRemoteFileMapping, encrypt bool,
 // localPath is the file or directory to start with, driveRoot is
 // the directory into which the file/directory will be sent
 func syncHierarchyUp(localPath string, driveRoot string,
-	existingFiles map[string]*drive.File, encrypt bool, ignoreTimes bool) error {
+	existingFiles gdrive.Files, encrypt bool, trustTimes bool) int {
 	if encrypt {
 		var err error
 		key, err = decryptEncryptionKey()
-		if err != nil {
-			return err
-		}
+		checkFatalError(err, "decrypt key")
 	}
 
 	fileMappings, err := compileUploadFileTree(localPath, driveRoot, encrypt)
 	checkFatalError(err, "error getting local filetree")
 	fileMappings, err = filterFilesToUpload(fileMappings, existingFiles, encrypt,
-		ignoreTimes)
+		trustTimes)
 	checkFatalError(err, "error determining files to sync")
 
 	if len(fileMappings) == 0 {
-		fmt.Fprintln(os.Stderr,
-			"skicka: there are no new files that need to be uploaded.")
-		return nil
+		fmt.Fprintln(os.Stderr, "skicka: No files to be uploaded.")
+		return 0
 	}
 
 	nBytesToUpload := int64(0)
@@ -553,30 +536,31 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	}
 	fileProgressBar.Finish()
 
-	if nUploadErrors == 0 {
-		return nil
+	if nUploadErrors > 0 {
+		fmt.Fprintf(os.Stderr, "skicka: %d files not uploaded due to errors. "+
+			"This is likely a transient failure; try uploading again", nUploadErrors)
 	}
-	return fmt.Errorf("%d files not uploaded due to errors. "+
-		"This is likely a transient failure; try uploading again", nUploadErrors)
+	return int(nUploadErrors)
 }
 
 func filterFilesToUpload(fileMappings []localToRemoteFileMapping,
-	existingDriveFiles map[string]*drive.File,
-	encrypt, ignoreTimes bool) ([]localToRemoteFileMapping, error) {
-
+	files gdrive.Files, encrypt, trustTimes bool) ([]localToRemoteFileMapping, error) {
 	// files to be uploaded are kept in this slice
 	var toUpload []localToRemoteFileMapping
 
 	for _, file := range fileMappings {
-		driveFile, exists := existingDriveFiles[file.RemotePath]
-		if !exists {
+		driveFile, err := files.GetOne(file.RemotePath)
+		if err == gdrive.ErrNotExist {
 			toUpload = append(toUpload, file)
+		} else if err == gdrive.ErrMultipleFiles {
+			fmt.Fprintf(os.Stderr, "skicka: %s: multiple files/folders with this name exist "+
+				"in Google Drive. Skipping all files in this hierarchy.\n",
+				file.RemotePath)
 		} else {
 			// The file already exists on Drive; just make sure it has all
 			// of the properties that we expect.
 			if err := createMissingProperties(driveFile, file.LocalFileInfo.Mode(),
 				encrypt); err != nil {
-
 				return nil, err
 			}
 
@@ -614,8 +598,8 @@ func filterFilesToUpload(fileMappings []localToRemoteFileMapping,
 					file.LocalPath)
 				toUpload = append(toUpload, file)
 				continue
-			} else if timeMatches == true && !ignoreTimes {
-				debug.Printf("metadata matches; skipping upload of %s",
+			} else if timeMatches == true && trustTimes {
+				debug.Printf("size and time match; skipping upload of %s",
 					file.LocalPath)
 				continue
 			}
