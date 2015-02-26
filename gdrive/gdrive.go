@@ -1193,7 +1193,7 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
 		return Retry, nil
 	}
 
-	gd.debug("got status %d from chunk for file %s", resp.StatusCode,
+	gd.debug("got status %d from chunk for file %s: %v", resp.StatusCode,
 		f.Id, resp)
 
 	switch {

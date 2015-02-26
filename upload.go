@@ -87,14 +87,15 @@ func upload(args []string) int {
 		case "-encrypt":
 			encrypt = true
 		default:
-			printUsageAndExit()
+			uploadUsage()
+			return 1
 		}
 	}
 
 	localPath := filepath.Clean(args[i])
 	drivePath := filepath.Clean(args[i+1])
 
-	// Make sure localPath exists and is a directory.
+	// Make sure localPath exists.
 	if _, err := os.Stat(localPath); err != nil {
 		printErrorAndExit(err)
 	}
@@ -689,7 +690,7 @@ func compileUploadFileTree(localPath, driveRoot string, encrypt bool) ([]localTo
 		}
 
 		// Get the file's path relative to the base directory we're
-		// uplaoding from.
+		// uploading from.
 		relPath, err := filepath.Rel(localPath, path)
 		if err != nil {
 			return err

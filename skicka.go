@@ -451,7 +451,7 @@ func addErrorAndPrintMessage(totalErrors *int32, message string, err error) {
 }
 
 func printErrorAndExit(err error) {
-	fmt.Fprintf(os.Stderr, "\rskicka: %v", err)
+	fmt.Fprintf(os.Stderr, "\rskicka: %s\n", err)
 	os.Exit(1)
 }
 
