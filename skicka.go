@@ -25,6 +25,7 @@ import (
 	"code.google.com/p/go.crypto/pbkdf2"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -137,6 +138,22 @@ func (d debugging) Printf(format string, args ...interface{}) {
 	if d {
 		log.Print(sanitize(fmt.Sprintf(format, args...)))
 	}
+}
+
+// fileCloser is kind of a hack: it implements the io.ReadCloser
+// interface, wherein the Read() calls go to R, and the Close() call
+// goes to C.
+type fileCloser struct {
+	R io.Reader
+	C *os.File
+}
+
+func (fc *fileCloser) Read(b []byte) (int, error) {
+	return fc.R.Read(b)
+}
+
+func (fc *fileCloser) Close() error {
+	return fc.C.Close()
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -270,6 +287,61 @@ func printFinalStats() {
 		fmtbytes(maxActiveBytes, false))
 }
 
+// Return the MD5 hash of the file at the given path in the form of a
+// string. If encryption is enabled, use the encrypted file contents when
+// computing the hash.
+func localFileMD5Contents(path string, encrypt bool, iv []byte) (string, error) {
+	contentsReader, _, err := getFileContentsReaderForUpload(path, encrypt, iv)
+	if contentsReader != nil {
+		defer contentsReader.Close()
+	}
+	if err != nil {
+		return "", err
+	}
+
+	md5 := md5.New()
+	n, err := io.Copy(md5, contentsReader)
+	atomic.AddInt64(&stats.DiskReadBytes, n)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%x", md5.Sum(nil)), nil
+}
+
+// Returns an io.ReadCloser for given file, such that the bytes read are
+// ready for upload: specifically, if encryption is enabled, the contents
+// are encrypted with the given key and the initialization vector is
+// prepended to the returned bytes. Otherwise, the contents of the file are
+// returned directly.
+func getFileContentsReaderForUpload(path string, encrypt bool,
+	iv []byte) (io.ReadCloser, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return f, 0, err
+	}
+
+	stat, err := os.Stat(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	fileSize := stat.Size()
+
+	if encrypt {
+		if key == nil {
+			key = decryptEncryptionKey()
+		}
+
+		r := makeEncrypterReader(key, iv, f)
+
+		// Prepend the initialization vector to the returned bytes.
+		r = io.MultiReader(bytes.NewReader(iv[:aes.BlockSize]), r)
+
+		return &fileCloser{R: r, C: f}, fileSize + aes.BlockSize, nil
+	}
+	return f, fileSize, nil
+}
+
 ///////////////////////////////////////////////////////////////////////////
 // Encryption/decryption
 
@@ -373,7 +445,7 @@ func generateKey() {
 
 // Decrypts the encrypted encryption key using values from the config file
 // and the user's passphrase.
-func decryptEncryptionKey() ([]byte, error) {
+func decryptEncryptionKey() []byte {
 	if key != nil {
 		panic("key aready decrypted!")
 	}
@@ -385,8 +457,9 @@ func decryptEncryptionKey() ([]byte, error) {
 
 	passphrase := os.Getenv(passphraseEnvironmentVariable)
 	if passphrase == "" {
-		return nil, fmt.Errorf(passphraseEnvironmentVariable +
+		fmt.Fprintf(os.Stderr, "skicka: "+passphraseEnvironmentVariable+
 			" environment variable not set")
+		os.Exit(1)
 	}
 
 	derivedKey := pbkdf2.Key([]byte(passphrase), salt, 65536, 64, sha256.New)
@@ -394,15 +467,14 @@ func decryptEncryptionKey() ([]byte, error) {
 	// when we first generated the key; if they don't, the user gave us
 	// the wrong passphrase.
 	if !bytes.Equal(derivedKey[:32], passphraseHash) {
-		return nil, fmt.Errorf("incorrect passphrase")
+		fmt.Fprintf(os.Stderr, "skicka: incorrect passphrase")
+		os.Exit(1)
 	}
 
 	// Use the last 32 bytes of the derived key to decrypt the actual
 	// encryption key.
 	keyEncryptKey := derivedKey[32:]
-	decryptedKey := decryptBytes(keyEncryptKey, encryptedKeyIv, encryptedKey)
-
-	return decryptedKey, nil
+	return decryptBytes(keyEncryptKey, encryptedKeyIv, encryptedKey)
 }
 
 ///////////////////////////////////////////////////////////////////////////

@@ -20,9 +20,7 @@
 package main
 
 import (
-	"bytes"
 	"crypto/aes"
-	"crypto/md5"
 	"encoding/hex"
 	"fmt"
 	"github.com/cheggaaa/pb"
@@ -38,30 +36,14 @@ import (
 	"time"
 )
 
-// fileCloser is kind of a hack: it implements the io.ReadCloser
-// interface, wherein the Read() calls go to R, and the Close() call
-// goes to C.
-type fileCloser struct {
-	R io.Reader
-	C *os.File
-}
-
-func (fc *fileCloser) Read(b []byte) (int, error) {
-	return fc.R.Read(b)
-}
-
-func (fc *fileCloser) Close() error {
-	return fc.C.Close()
-}
-
 type byteCountingReader struct {
 	R         io.Reader
-	bytesRead int
+	bytesRead int64
 }
 
 func (bcr *byteCountingReader) Read(dst []byte) (int, error) {
 	read, err := bcr.R.Read(dst)
-	bcr.bytesRead += read
+	bcr.bytesRead += int64(read)
 	return read, err
 }
 
@@ -144,6 +126,7 @@ func (l2r localToRemoteBySize) Less(i, j int) bool {
 // (unless the -ignore-times flag has been used).
 func fileMetadataMatches(info os.FileInfo, encrypt bool,
 	driveFile *drive.File) (bool, bool, error) {
+	// Compare file sizes.
 	localSize := info.Size()
 	driveSize := driveFile.FileSize
 	if encrypt {
@@ -154,75 +137,14 @@ func fileMetadataMatches(info os.FileInfo, encrypt bool,
 	}
 	sizeMatches := localSize == driveSize
 
+	// Compare modification times.
 	driveTime, err := gdrive.GetModificationTime(driveFile)
 	if err != nil {
 		return sizeMatches, false, err
 	}
-
-	// Finally, check if the local modification time is different than the
-	// modification time of the file the last time it was updated on Drive;
-	// if it is, we return false and an upload will be done..
 	localTime := info.ModTime()
 	debug.Printf("localTime: %v, driveTime: %v", localTime, driveTime)
 	return sizeMatches, localTime.Equal(driveTime), nil
-}
-
-// Return the md5 hash of the file at the given path in the form of a
-// string. If encryption is enabled, use the encrypted file contents when
-// computing the hash.
-func localFileMD5Contents(path string, encrypt bool, iv []byte) (string, error) {
-	contentsReader, _, err := getFileContentsReaderForUpload(path, encrypt, iv)
-	if contentsReader != nil {
-		defer contentsReader.Close()
-	}
-	if err != nil {
-		return "", err
-	}
-
-	md5 := md5.New()
-	n, err := io.Copy(md5, contentsReader)
-	if err != nil {
-		return "", err
-	}
-	atomic.AddInt64(&stats.DiskReadBytes, n)
-
-	return fmt.Sprintf("%x", md5.Sum(nil)), nil
-}
-
-// Returns an io.ReadCloser for given file, such that the bytes read are
-// ready for upload: specifically, if encryption is enabled, the contents
-// are encrypted with the given key and the initialization vector is
-// prepended to the returned bytes. Otherwise, the contents of the file are
-// returned directly.
-func getFileContentsReaderForUpload(path string, encrypt bool,
-	iv []byte) (io.ReadCloser, int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return f, 0, err
-	}
-
-	stat, err := os.Stat(path)
-	if err != nil {
-		return nil, 0, err
-	}
-	fileSize := stat.Size()
-
-	if encrypt {
-		if key == nil {
-			key, err = decryptEncryptionKey()
-			if err != nil {
-				return nil, 0, err
-			}
-		}
-
-		r := makeEncrypterReader(key, iv, f)
-
-		// Prepend the initialization vector to the returned bytes.
-		r = io.MultiReader(bytes.NewReader(iv[:aes.BlockSize]), r)
-
-		return &fileCloser{R: r, C: f}, fileSize + aes.BlockSize, nil
-	}
-	return f, fileSize, nil
 }
 
 // Given a file on the local disk, synchronize it with Google Drive: if the
@@ -230,8 +152,6 @@ func getFileContentsReaderForUpload(path string, encrypt bool,
 // but has different contents, the contents are updated.  The Unix
 // permissions and file modification time on Drive are also updated
 // appropriately.
-// Besides being sent up to Google Drive, the file is tee'd (via io.Tee)
-// into an optional writer variable.  This variable can safely be nil.
 func syncFileUp(fileMapping localToRemoteFileMapping, encrypt bool,
 	files gdrive.Files, pb *pb.ProgressBar) error {
 	// We need to create the file or folder on Google Drive.
@@ -244,14 +164,8 @@ func syncFileUp(fileMapping localToRemoteFileMapping, encrypt bool,
 	if dirPath == "." {
 		dirPath = "/"
 	}
-	parentFile, err := files.GetOne(dirPath)
-	if err != nil {
-		parentFile, err = gd.GetFile(dirPath)
-		// We can't really recover at this point; the parent folder
-		// definitely should have been created by now, and we can't proceed
-		// without it...
-		checkFatalError(err, "get parent directory")
-	}
+	parentFolder, err := files.GetOne(dirPath)
+	checkFatalError(err, "get parent directory")
 
 	baseName := filepath.Base(fileMapping.RemotePath)
 	var driveFile *drive.File
@@ -259,7 +173,7 @@ func syncFileUp(fileMapping localToRemoteFileMapping, encrypt bool,
 	if fileMapping.LocalFileInfo.IsDir() {
 		driveFile, err = createDriveFolder(baseName,
 			fileMapping.LocalFileInfo.Mode(), fileMapping.LocalFileInfo.ModTime(),
-			parentFile)
+			parentFolder)
 		if err != nil {
 			return err
 		}
@@ -282,9 +196,8 @@ func syncFileUp(fileMapping localToRemoteFileMapping, encrypt bool,
 		files.Add(fileMapping.RemotePath, driveFile)
 	} else {
 		if driveFile, err = files.GetOne(fileMapping.RemotePath); err == gdrive.ErrNotExist {
-			driveFile, err = createDriveFile(baseName,
-				fileMapping.LocalFileInfo.Mode(),
-				fileMapping.LocalFileInfo.ModTime(), encrypt, parentFile)
+			driveFile, err = createDriveFile(baseName, fileMapping.LocalFileInfo.Mode(),
+				fileMapping.LocalFileInfo.ModTime(), encrypt, parentFolder)
 			if err != nil {
 				return err
 			}
@@ -298,60 +211,9 @@ func syncFileUp(fileMapping localToRemoteFileMapping, encrypt bool,
 			}
 		}
 
-		for ntries := 0; ntries < 5; ntries++ {
-			var reader io.Reader
-			var countingReader *byteCountingReader
-
-			contentsReader, length, err :=
-				getFileContentsReaderForUpload(fileMapping.LocalPath, encrypt, iv)
-			if contentsReader != nil {
-				defer contentsReader.Close()
-			}
-			if err != nil {
-				return err
-			}
-			reader = contentsReader
-
-			if pb != nil {
-				countingReader = &byteCountingReader{
-					R: reader,
-				}
-				reader = io.TeeReader(countingReader, pb)
-			}
-
-			if length >= resumableUploadMinSize {
-				err = gd.UploadFileContentsResumable(driveFile, reader, length)
-			} else {
-				err = gd.UploadFileContents(driveFile, reader, length, ntries)
-			}
-
-			if err == nil {
-				// Success!
-				atomic.AddInt64(&stats.DriveFilesUpdated, 1)
-				atomic.AddInt64(&stats.UploadBytes, length)
-				break
-			}
-
-			if re, ok := err.(gdrive.RetryHTTPTransmitError); ok {
-				debug.Printf("%s: got retry http error--retrying: %s",
-					fileMapping.LocalPath, re.Error())
-				if pb != nil {
-					// The "progress" made so far on
-					// this file should be rolled back
-					pb.Add64(int64(0 - countingReader.bytesRead))
-				}
-			} else {
-				debug.Printf("%s: giving up due to error: %v",
-					fileMapping.LocalPath, err)
-				// This file won't be uploaded, so subtract
-				// the expected progress from the total
-				// expected bytes
-				if pb != nil {
-					pb.Add64(int64(0 - countingReader.bytesRead))
-					pb.Total -= length
-				}
-				return err
-			}
+		err = uploadFileContents(fileMapping.LocalPath, driveFile, encrypt, iv, pb)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -360,15 +222,74 @@ func syncFileUp(fileMapping localToRemoteFileMapping, encrypt bool,
 	return gd.UpdateModificationTime(driveFile, fileMapping.LocalFileInfo.ModTime())
 }
 
+// uploadFileContents does its best to upload the local file stored at
+// localPath to the given *drive.File on Google Drive.  (It assumes that
+// the *drive.File has already been created.)
+func uploadFileContents(localPath string, driveFile *drive.File, encrypt bool, iv []byte,
+	pb *pb.ProgressBar) error {
+	for ntries := 0; ntries < 5; ntries++ {
+		var reader io.Reader
+		var countingReader *byteCountingReader
+
+		contentsReader, length, err :=
+			getFileContentsReaderForUpload(localPath, encrypt, iv)
+		if contentsReader != nil {
+			defer contentsReader.Close()
+		}
+		if err != nil {
+			return err
+		}
+		reader = contentsReader
+
+		if pb != nil {
+			countingReader = &byteCountingReader{
+				R: reader,
+			}
+			reader = io.TeeReader(countingReader, pb)
+		}
+
+		if length >= resumableUploadMinSize {
+			err = gd.UploadFileContentsResumable(driveFile, reader, length)
+		} else {
+			err = gd.UploadFileContents(driveFile, reader, length, ntries)
+		}
+
+		if err == nil {
+			// Success!
+			atomic.AddInt64(&stats.DriveFilesUpdated, 1)
+			atomic.AddInt64(&stats.UploadBytes, length)
+			return nil
+		}
+
+		if re, ok := err.(gdrive.RetryHTTPTransmitError); ok {
+			debug.Printf("%s: got retry http error--retrying: %s",
+				localPath, re.Error())
+			if pb != nil {
+				// The "progress" made so far on this file should be
+				// rolled back
+				pb.Add64(-countingReader.bytesRead)
+			}
+		} else {
+			debug.Printf("%s: giving up due to error: %v", localPath, err)
+			// This file won't be uploaded, so subtract the expected
+			// progress from the total expected bytes
+			if pb != nil {
+				pb.Add64(-countingReader.bytesRead)
+				pb.Total -= length
+			}
+			return err
+		}
+	}
+	return nil
+}
+
 // Synchronize a local directory hierarchy with Google Drive.
 // localPath is the file or directory to start with, driveRoot is
 // the directory into which the file/directory will be sent
 func syncHierarchyUp(localPath string, driveRoot string,
 	existingFiles gdrive.Files, encrypt bool, trustTimes bool) int {
-	if encrypt {
-		var err error
-		key, err = decryptEncryptionKey()
-		checkFatalError(err, "decrypt key")
+	if encrypt && key == nil {
+		key = decryptEncryptionKey()
 	}
 
 	fileMappings, err := compileUploadFileTree(localPath, driveRoot, encrypt)
@@ -407,6 +328,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	nUploadErrors := int32(0)
 
 	if len(directoryNames) > 0 {
+		// Actually create/update the directories.
 		dirProgressBar := pb.New(len(directoryNames))
 		dirProgressBar.ShowBar = true
 		dirProgressBar.Output = os.Stderr
@@ -465,9 +387,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	// Smaller files will be handled with multiple threads going at once;
 	// doing so improves bandwidth utilization since round-trips to the
 	// Drive APIs take a while.  (However, we don't want too have too many
-	// workers; this would both lead to lots of 403 rate limit errors as
-	// well as possibly increase memory use too much if we're uploading
-	// lots of large files...)
+	// workers; this would both lead to lots of 403 rate limit errors...)
 	nWorkers := 4
 
 	// Upload worker threads send a value over this channel when
@@ -586,8 +506,8 @@ func filterFilesToUpload(fileMappings []localToRemoteFileMapping,
 			}
 
 			// Compare the things we can do quickly (sizes, times).
-			sizeMatches, timeMatches, err := fileMetadataMatches(file.LocalFileInfo, encrypt,
-				driveFile)
+			sizeMatches, timeMatches, err := fileMetadataMatches(file.LocalFileInfo,
+				encrypt, driveFile)
 
 			if err != nil {
 				return nil, err

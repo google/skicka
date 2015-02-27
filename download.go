@@ -486,10 +486,7 @@ func downloadDriveFile(writer io.Writer, driveFile *drive.File) error {
 	// Decrypt the contents, if they're encrypted.
 	if encrypted {
 		if key == nil {
-			key, err = decryptEncryptionKey()
-			if err != nil {
-				return err
-			}
+			key = decryptEncryptionKey()
 		}
 
 		// Read the initialization vector from the start of the file.
