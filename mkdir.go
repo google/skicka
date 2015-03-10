@@ -48,7 +48,7 @@ func mkdir(args []string) int {
 		mkdirUsage()
 	}
 
-	root, err := gd.GetFile("/")
+	root, err := gd.GetFile(gdrive.GetPathChar())
 	if err != nil {
 		printErrorAndExit(fmt.Errorf("unable to get Drive root directory: %v", err))
 	}
@@ -58,7 +58,7 @@ func mkdir(args []string) int {
 		drivePath := filepath.Clean(args[i])
 
 		parent := root
-		dirs := strings.Split(drivePath, "/")
+		dirs := strings.Split(drivePath, gdrive.GetPathChar())
 		nDirs := len(dirs)
 		pathSoFar := ""
 		// Walk through the directories in the path in turn.
@@ -68,7 +68,7 @@ func mkdir(args []string) int {
 				// path starts with a '/'.
 				continue
 			}
-			pathSoFar += "/" + dir
+			pathSoFar += gdrive.GetPathChar() + dir
 
 			// Get the Drive File file for our current point in the path.
 			file, err := gd.GetFileInFolder(dir, parent)
