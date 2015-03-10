@@ -41,6 +41,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -60,6 +61,14 @@ var ErrMultipleFiles = errors.New("multiple files on Drive")
 type RetryHTTPTransmitError struct {
 	StatusCode int
 	StatusBody string
+}
+
+func GetPathChar() string {
+	if runtime.GOOS == "windows" {
+		return "\\"
+	} else {
+		return "/"
+	}
 }
 
 func (r RetryHTTPTransmitError) Error() string {
@@ -545,7 +554,7 @@ func (gd *GDrive) GetFile(path string) (*drive.File, error) {
 		return nil, fmt.Errorf("unable to get Drive root directory: %v", err)
 	}
 
-	dirs := strings.Split(path, "/")
+	dirs := strings.Split(path, GetPathChar())
 	// Walk through the directories in the path in turn.
 	for _, dir := range dirs {
 		if dir == "" {
@@ -577,13 +586,13 @@ func (gd *GDrive) GetFiles(path string) ([]*drive.File, error) {
 		return nil, fmt.Errorf("unable to get Drive root directory: %v", err)
 	}
 	// Special case the root directory.
-	if path == "/" {
+	if path == GetPathChar() {
 		files := make([]*drive.File, 1)
 		files[0] = root
 		return files, nil
 	}
 
-	components := strings.Split(path, "/")
+	components := strings.Split(path, GetPathChar())
 	if components[0] == "" {
 		// The first string in the split is "" if the path starts with a
 		// '/', so skip over that directory component.
@@ -668,7 +677,7 @@ func (gd *GDrive) getFolderContents(path string, parentFolder *drive.File,
 	}
 
 	for _, f := range dirfiles {
-		filepath := filepath.Clean(path + "/" + f.Title)
+		filepath := filepath.Clean(path + GetPathChar() + f.Title)
 		if _, ok := existingFiles[filepath]; ok == true {
 			// This shouldn't happen in principle, but Drive does
 			// allow multiple files to have the same title. It's not
@@ -834,7 +843,7 @@ func (gd *GDrive) getFolderContentsRecursive(path string, parentFolder *drive.Fi
 	}
 
 	for _, f := range dirfiles {
-		filepath := filepath.Clean(path + "/" + f.Title)
+		filepath := filepath.Clean(path + GetPathChar() + f.Title)
 		files.Add(filepath, f)
 		if IsFolder(f) && recursive {
 			err := gd.getFolderContentsRecursive(filepath, f, recursive, files)

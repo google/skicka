@@ -585,12 +585,14 @@ func readConfigFile(filename string) {
 			"file path: %v", filename, err))
 	}
 
-	if info, err := os.Stat(filename); err != nil {
-		printErrorAndExit(fmt.Errorf("skicka: %v", err))
-	} else if goperms := info.Mode() & ((1 << 6) - 1); goperms != 0 {
-		printErrorAndExit(fmt.Errorf("skicka: %s: permissions of configuration file "+
-			"allow group/other access. Your secrets are at risk.",
-			filename))
+	if runtime.GOOS != "windows" {
+		if info, err := os.Stat(filename); err != nil {
+			printErrorAndExit(fmt.Errorf("skicka: %v", err))
+		} else if goperms := info.Mode() & ((1 << 6) - 1); goperms != 0 {
+			printErrorAndExit(fmt.Errorf("skicka: %s: permissions of configuration file "+
+				"allow group/other access. Your secrets are at risk.",
+				filename))
+		}
 	}
 
 	err = gcfg.ReadFileInto(&config, filename)
@@ -669,10 +671,22 @@ General options valid for all commands:
 `)
 }
 
+func UserHomeDir() string {
+	if runtime.GOOS == "windows" {
+		home := os.Getenv("HOMEDRIVE") + os.Getenv("HOMEPATH")
+		if home == "" {
+			home = os.Getenv("USERPROFILE")
+		}
+		return home
+	}
+	return os.Getenv("HOME")
+}
+
 func main() {
-	cachefile := flag.String("tokencache", "~/.skicka.tokencache.json",
+	dir := UserHomeDir()
+	cachefile := flag.String("tokencache", dir+"/.skicka.tokencache.json",
 		"OAuth2 token cache file")
-	configFilename := flag.String("config", "~/.skicka.config",
+	configFilename := flag.String("config", dir+"/.skicka.config",
 		"Configuration file")
 	vb := flag.Bool("verbose", false, "Enable verbose output")
 	dbg := flag.Bool("debug", false, "Enable debugging output")
