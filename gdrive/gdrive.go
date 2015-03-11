@@ -679,6 +679,9 @@ func (f Files) Add(path string, df *drive.File) {
 // no such file exists, and ErrMultipleFiles if multiple files with that
 // pathname exist.
 func (f Files) GetOne(path string) (*drive.File, error) {
+	if path == "." {
+		path = "/"
+	}
 	fs, ok := f.files[path]
 	if !ok {
 		return nil, ErrNotExist
@@ -691,6 +694,9 @@ func (f Files) GetOne(path string) (*drive.File, error) {
 // Get returns all of the *drive.Files that are named by the given path.
 // If no such file exists, it returns the ErrNotExist error cod.
 func (f Files) Get(path string) ([]*drive.File, error) {
+	if path == "." {
+		path = "/"
+	}
 	fs, ok := f.files[path]
 	if !ok {
 		return nil, ErrNotExist
