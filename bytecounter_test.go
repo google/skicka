@@ -43,7 +43,7 @@ func TestMultipleReadsAccumlateBytesCorrectly(t *testing.T) {
 		read, err = bcr.Read(oneByte)
 	}
 
-	expectedByteCount := 6
+	expectedByteCount := int64(6)
 	if bcr.bytesRead != expectedByteCount {
 		t.Fatalf("The byte counting reader should have accumulated %d bytes, but accumulated %d",
 			expectedByteCount, bcr.bytesRead)
@@ -92,7 +92,7 @@ func TestByteCountingReaderCanAccumulateFromDifferentReaders(t *testing.T) {
 		read, _ = bcr.Read(buffer)
 	}
 
-	expectedAccumulatedBytes := 14
+	expectedAccumulatedBytes := int64(14)
 	if expectedAccumulatedBytes != bcr.bytesRead {
 		t.Fatalf("Expected ByteCountingReader to have read %d byte[s], but read %d byte[s]",
 			expectedAccumulatedBytes, bcr.bytesRead)
