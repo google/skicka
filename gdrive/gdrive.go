@@ -1317,7 +1317,8 @@ func (gd *GDrive) UpdateModificationTime(f *drive.File, newTime time.Time) error
 // actually created. Delete the file to be sure we don't have duplicate
 // files with the same name.
 func (gd *GDrive) deleteIncompleteDriveFiles(title string, parentId string) {
-	query := fmt.Sprintf("'%s' in parents and title='%s'", parentId, title)
+	query := fmt.Sprintf("title='%s' and '%s' in parents and trashed=false",
+		title, parentId)
 	files, err := gd.runQuery(query)
 	if err != nil {
 		gd.debug("unable to run query in deleteIncompleteDriveFiles(); "+
