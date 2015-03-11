@@ -29,6 +29,7 @@ import (
 	"google.golang.org/api/drive/v2"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -87,7 +88,7 @@ func download(args []string) int {
 		if err == nil && stat.IsDir() {
 			// drivePath is a single file but localPath is a directory, so
 			// append the base name of the drive file to the local path.
-			localPath += "/" + filepath.Base(drivePath)
+			localPath = path.Join(localPath, filepath.Base(drivePath))
 		}
 
 		err = syncOneFileDown(gdrive.File{drivePath, files[0]}, localPath, trustTimes)
@@ -276,7 +277,7 @@ func createPathMap(files []gdrive.File, localBasePath, driveBasePath string) map
 				f.Path, driveBasePath))
 		}
 		if len(f.Path) > len(driveBasePath) {
-			localPath += "/" + f.Path[len(driveBasePath):]
+			localPath = path.Join(localPath, f.Path[len(driveBasePath):])
 		}
 		debug.Printf("Drive file %s [id %d] -> local %s", f.Path, f.File.Id, localPath)
 		m[f.File.Id] = localPath

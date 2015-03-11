@@ -37,8 +37,6 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
-	"os/user"
-	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -158,30 +156,6 @@ func (fc *fileCloser) Close() error {
 
 ///////////////////////////////////////////////////////////////////////////
 // Small utility functions
-
-// If the given path starts with a tilde, performs shell glob expansion
-// to convert it to the path of the home directory.
-func tildeExpand(path string) string {
-	path = filepath.Clean(path)
-	if path[:2] == "~/" {
-		usr, err := user.Current()
-		checkFatalError(err, "couldn't get current user")
-		return strings.Replace(path, "~", usr.HomeDir, 1)
-	} else if path[:1] == "~" {
-		slashindex := strings.Index(path, "/")
-		var username string
-		if slashindex == -1 {
-			username = path[1:]
-		} else {
-			username = path[1:slashindex]
-		}
-		usr, err := user.Lookup(username)
-		checkFatalError(err, fmt.Sprintf("%s: couldn't lookup user", username))
-		return usr.HomeDir + path[slashindex:]
-	} else {
-		return path
-	}
-}
 
 // Utility function to decode hex-encoded bytes; treats any encoding errors
 // as fatal errors (we assume that checkConfigValidity has already made
@@ -340,6 +314,14 @@ func getFileContentsReaderForUpload(path string, encrypt bool,
 		return &fileCloser{R: r, C: f}, fileSize + aes.BlockSize, nil
 	}
 	return f, fileSize, nil
+}
+
+func pathSeparator() string {
+	if runtime.GOOS == "windows" {
+		return "\\"
+	} else {
+		return "/"
+	}
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -626,14 +608,14 @@ func checkConfigValidity() {
 }
 
 func readConfigFile(filename string) {
-	filename = tildeExpand(filename)
-
-	if info, err := os.Stat(filename); err != nil {
-		printErrorAndExit(fmt.Errorf("%s: %v", filename, err))
-	} else if goperms := info.Mode() & ((1 << 6) - 1); goperms != 0 {
-		printErrorAndExit(fmt.Errorf("%s: permissions of configuration file "+
-			"allow group/other access. Your secrets are at risk.",
-			filename))
+	if runtime.GOOS != "windows" {
+		if info, err := os.Stat(filename); err != nil {
+			printErrorAndExit(fmt.Errorf("%s: %v", filename, err))
+		} else if goperms := info.Mode() & ((1 << 6) - 1); goperms != 0 {
+			printErrorAndExit(fmt.Errorf("%s: permissions of configuration file "+
+				"allow group/other access. Your secrets are at risk.",
+				filename))
+		}
 	}
 
 	err := gcfg.ReadFileInto(&config, filename)
@@ -718,10 +700,22 @@ func shortUsage() {
 	fmt.Fprintf(os.Stderr, "Run \"skicka help\" for more detailed help text.\n")
 }
 
+func userHomeDir() string {
+	if runtime.GOOS == "windows" {
+		home := os.Getenv("HOMEDRIVE") + os.Getenv("HOMEPATH")
+		if home == "" {
+			home = os.Getenv("USERPROFILE")
+		}
+		return home
+	}
+	return os.Getenv("HOME")
+}
+
 func main() {
-	cachefile := flag.String("tokencache", "~/.skicka.tokencache.json",
+	home := userHomeDir()
+	cachefile := flag.String("tokencache", home+"/.skicka.tokencache.json",
 		"OAuth2 token cache file")
-	configFilename := flag.String("config", "~/.skicka.config",
+	configFilename := flag.String("config", home+"/.skicka.config",
 		"Configuration file")
 	vb := flag.Bool("verbose", false, "Enable verbose output")
 	dbg := flag.Bool("debug", false, "Enable debugging output")
@@ -735,9 +729,6 @@ func main() {
 
 	debug = debugging(*dbg)
 	verbose = debugging(*vb || bool(debug))
-
-	var err error
-	*configFilename = tildeExpand(*configFilename)
 
 	cmd := flag.Arg(0)
 	// Commands that don't need the config file to be read or to use
@@ -754,8 +745,6 @@ func main() {
 		return
 	}
 
-	*cachefile = tildeExpand(*cachefile)
-
 	readConfigFile(*configFilename)
 
 	// Choose the appropriate callback function for the GDrive object to
@@ -767,6 +756,7 @@ func main() {
 		dpf = debugNoPrint
 	}
 
+	var err error
 	gd, err = gdrive.New(config.Google.ClientId, config.Google.ClientSecret,
 		config.Google.ApiKey, *cachefile, config.Upload.Bytes_per_second_limit,
 		config.Download.Bytes_per_second_limit, dpf, *dbg)

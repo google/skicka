@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"github.com/google/skicka/gdrive"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -58,7 +59,7 @@ func mkdir(args []string) int {
 		drivePath := filepath.Clean(args[i])
 
 		parent := root
-		dirs := strings.Split(drivePath, "/")
+		dirs := strings.Split(drivePath, pathSeparator())
 		nDirs := len(dirs)
 		pathSoFar := ""
 		// Walk through the directories in the path in turn.
@@ -68,7 +69,7 @@ func mkdir(args []string) int {
 				// path starts with a '/'.
 				continue
 			}
-			pathSoFar += "/" + dir
+			pathSoFar = path.Join(pathSoFar, dir)
 
 			// Get the Drive File file for our current point in the path.
 			file, err := gd.GetFileInFolder(dir, parent)
