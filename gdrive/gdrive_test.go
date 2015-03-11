@@ -42,11 +42,11 @@ func TestGetSorted(t *testing.T) {
 
 	files := f.GetSorted()
 
-	expected := []string("aaa", "aaa", "b", "b", "c", "z")
+	expected := []string{"aaa", "aaa", "b", "b", "c", "z"}
 	if len(files) != len(expected) {
 		t.Fatalf("Expected %d sorted files, got %v", len(expected), len(files))
 	}
-	for i, s := range expected {
+	for i, _ := range expected {
 		if files[i].Path != expected[i] || files[i].File.Title != expected[i] {
 			t.Fatalf("Expected \"%s\" for %d'th sorted file, got %v", expected[i],
 				i, files[i])
@@ -65,7 +65,7 @@ func TestGetSortedUnique(t *testing.T) {
 
 	files, dupes := f.GetSortedUnique()
 	if len(files) != 2 {
-		t.Fatalf("Expected 2 unique files, got %v", len(files))
+		t.Fatalf("Expected 2 unique files, got %v: %v", len(files), files)
 	}
 	if files[0].Path != "c" || files[0].File.Title != "c" {
 		t.Fatalf("Expected \"c\" for first sorted file, got %v", files[0])
@@ -81,7 +81,7 @@ func TestGetSortedUnique(t *testing.T) {
 		t.Fatalf("Expected \"aaa\" for first dupe, got %s", dupes[0])
 	}
 	if dupes[1] != "b" {
-		t.Fatalf("Expected \"b\" for first dupe, got %s", dupes[1])
+		t.Fatalf("Expected \"b\" for second dupe, got %s", dupes[1])
 	}
 
 }

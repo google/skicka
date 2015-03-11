@@ -48,7 +48,7 @@ func (bcr *byteCountingReader) Read(dst []byte) (int, error) {
 }
 
 func uploadUsage() {
-	fmt.Printf("Usage: skicka upload [-ignore-times] local_path drive_path\n")
+	fmt.Printf("Usage: skicka upload [-ignore-times] [-encrypt] local_path drive_path\n")
 	fmt.Printf("Run \"skicka help\" for more detailed help text.\n")
 }
 
@@ -689,16 +689,10 @@ func createDriveFile(filename string, mode os.FileMode, modTime time.Time, encry
 		// Compute a unique IV for the file.
 		iv := getRandomBytes(aes.BlockSize)
 		ivhex := hex.EncodeToString(iv)
-
-		ivprop := new(drive.Property)
-		ivprop.Key = "IV"
-		ivprop.Value = ivhex
-		proplist = append(proplist, ivprop)
+		proplist = append(proplist, &drive.Property{Key: "IV", Value: ivhex})
 	}
-	permprop := new(drive.Property)
-	permprop.Key = "Permissions"
-	permprop.Value = fmt.Sprintf("%#o", mode&os.ModePerm)
-	proplist = append(proplist, permprop)
+	proplist = append(proplist, &drive.Property{Key: "Permissions",
+		Value: fmt.Sprintf("%#o", mode&os.ModePerm)})
 
 	return gd.InsertNewFile(filename, parentFolder, modTime, proplist)
 }
@@ -707,10 +701,8 @@ func createDriveFile(filename string, mode os.FileMode, modTime time.Time, encry
 func createDriveFolder(title string, mode os.FileMode, modTime time.Time,
 	parentFolder *drive.File) (*drive.File, error) {
 	var proplist []*drive.Property
-	permprop := new(drive.Property)
-	permprop.Key = "Permissions"
-	permprop.Value = fmt.Sprintf("%#o", mode&os.ModePerm)
-	proplist = append(proplist, permprop)
+	proplist = append(proplist, &drive.Property{Key: "Permissions",
+		Value: fmt.Sprintf("%#o", mode&os.ModePerm)})
 
 	return gd.InsertNewFolder(title, parentFolder, modTime, proplist)
 }

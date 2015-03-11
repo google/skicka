@@ -329,6 +329,7 @@ func (gd *GDrive) exponentialBackoff(try int, resp *http.Response, err error) {
 // Google Drive uses to uniquely identify the file. It deals with timeouts
 // and transient errors.
 func (gd *GDrive) getFileById(id string) (*drive.File, error) {
+	gd.debug("GetFileById: %s", id)
 	for try := 0; ; try++ {
 		file, err := gd.svc.Files.Get(id).Do()
 		if err == nil {
@@ -342,6 +343,7 @@ func (gd *GDrive) getFileById(id string) (*drive.File, error) {
 // runQuery executes the given query with the Google Drive API, returning
 // an array of files that match the query's conditions.
 func (gd *GDrive) runQuery(query string) ([]*drive.File, error) {
+	gd.debug("Running query: %s", query)
 	pageToken := ""
 	var result []*drive.File
 	for {
@@ -730,6 +732,8 @@ func (f Files) GetSortedUnique() ([]File, []string) {
 	var dupes []string
 	var files []File
 	for i, f := range allFiles {
+		// Non-duplicated files are different than their neighbors on both
+		// sides (if present).
 		if (i == 0 || f.Path != allFiles[i-1].Path) &&
 			(i == len(allFiles)-1 || f.Path != allFiles[i+1].Path) {
 			files = append(files, f)
@@ -1285,11 +1289,19 @@ func (gd *GDrive) UploadFileContentsResumable(driveFile *drive.File,
 
 // UpdateModificationTime updates the modification time of the given Google
 // Drive file to the given time.
-func (gd *GDrive) UpdateModificationTime(f *drive.File, t time.Time) error {
-	gd.debug("updating modification time of %s to %v", f.Title, t)
+func (gd *GDrive) UpdateModificationTime(f *drive.File, newTime time.Time) error {
+	gd.debug("updating modification time of %s to %v", f.Title, newTime)
+
+	currentTime, err := GetModificationTime(f)
+	if err != nil {
+		return err
+	}
+	if currentTime.Equal(newTime) {
+		return nil
+	}
 
 	for try := 0; ; try++ {
-		fp := &drive.File{ModifiedDate: t.UTC().Format(timeFormat)}
+		fp := &drive.File{ModifiedDate: newTime.UTC().Format(timeFormat)}
 		_, err := gd.svc.Files.Patch(f.Id, fp).SetModifiedDate(true).Do()
 		if err == nil {
 			gd.debug("success: updated modification time on %s", f.Title)
