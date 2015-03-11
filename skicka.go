@@ -689,6 +689,7 @@ Options valid for both "upload" and "download":
 General options valid for all commands:
   -config=<filename>     Specify a configuration file. Default: ~/.skicka.config.
   -debug                 Enable debugging output.
+  -dump-http             Dump http traffic.
   -tokencache=<filename> OAuth2 token cache file. Default: ~/.skicka.tokencache.json.
   -verbose               Enable verbose output.
 `)
@@ -719,6 +720,7 @@ func main() {
 		"Configuration file")
 	vb := flag.Bool("verbose", false, "Enable verbose output")
 	dbg := flag.Bool("debug", false, "Enable debugging output")
+	dumpHttp := flag.Bool("dump-http", false, "Dump http traffic")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -759,7 +761,7 @@ func main() {
 	var err error
 	gd, err = gdrive.New(config.Google.ClientId, config.Google.ClientSecret,
 		config.Google.ApiKey, *cachefile, config.Upload.Bytes_per_second_limit,
-		config.Download.Bytes_per_second_limit, dpf, *dbg)
+		config.Download.Bytes_per_second_limit, dpf, *dumpHttp)
 	if err != nil {
 		printErrorAndExit(fmt.Errorf("error creating Google Drive "+
 			"client: %v", err))

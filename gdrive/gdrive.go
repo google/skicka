@@ -444,8 +444,7 @@ func (lt loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 
 	resp, err := lt.transport.RoundTrip(req)
-	lt.gd.debug("http request: %s   --> response: %+v\nerr: %v\n--------\n",
-		dump, resp, err)
+	log.Printf("http request: %s--->response: %+v\n--->err: %v", dump, resp, err)
 	return resp, err
 }
 
