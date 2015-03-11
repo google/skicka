@@ -94,7 +94,7 @@ func checkRmPossible(path string, recursive bool) error {
 	if err != nil {
 		return err
 	} else if !recursive && gdrive.IsFolder(driveFile) {
-		return fmt.Errorf("skicka: %s: is a folder", path)
+		return fmt.Errorf("is a folder")
 	}
 	return nil
 }
