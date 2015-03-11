@@ -112,15 +112,15 @@ func syncOneFileDown(file gdrive.File, localPath string, trustTimes bool) error 
 		pb := getProgressBar(file.File.FileSize)
 		defer pb.Finish()
 		return downloadFile(file, localPath, pb)
-	} else {
-		// No download needed, but make sure the local permissions
-		// match the permissions on Drive.
-		mode, err := getPermissions(file.File)
-		if err != nil {
-			mode = 0644
-		}
-		return os.Chmod(localPath, mode)
 	}
+
+	// No download needed, but make sure the local permissions
+	// match the permissions on Drive.
+	mode, err := getPermissions(file.File)
+	if err != nil {
+		mode = 0644
+	}
+	return os.Chmod(localPath, mode)
 }
 
 // Synchronize an entire folder hierarchy from Drive to a local directory.

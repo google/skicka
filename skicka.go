@@ -319,9 +319,8 @@ func getFileContentsReaderForUpload(path string, encrypt bool,
 func pathSeparator() string {
 	if runtime.GOOS == "windows" {
 		return "\\"
-	} else {
-		return "/"
 	}
+	return "/"
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -720,7 +719,7 @@ func main() {
 		"Configuration file")
 	vb := flag.Bool("verbose", false, "Enable verbose output")
 	dbg := flag.Bool("debug", false, "Enable debugging output")
-	dumpHttp := flag.Bool("dump-http", false, "Dump http traffic")
+	dumpHTTP := flag.Bool("dump-http", false, "Dump http traffic")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -761,7 +760,7 @@ func main() {
 	var err error
 	gd, err = gdrive.New(config.Google.ClientId, config.Google.ClientSecret,
 		config.Google.ApiKey, *cachefile, config.Upload.Bytes_per_second_limit,
-		config.Download.Bytes_per_second_limit, dpf, *dumpHttp)
+		config.Download.Bytes_per_second_limit, dpf, *dumpHTTP)
 	if err != nil {
 		printErrorAndExit(fmt.Errorf("error creating Google Drive "+
 			"client: %v", err))

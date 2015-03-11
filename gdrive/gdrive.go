@@ -471,7 +471,7 @@ func pathSeparator() string {
 // operations are performed.
 func New(clientId, clientSecret, apiKey, cacheFile string,
 	uploadBytesPerSecond, downloadBytesPerSecond int,
-	debug func(s string, args ...interface{}), dumpHttp bool) (*GDrive, error) {
+	debug func(s string, args ...interface{}), dumpHTTP bool) (*GDrive, error) {
 	config := &oauth.Config{
 		ClientId:     clientId,
 		ClientSecret: clientSecret,
@@ -491,7 +491,7 @@ func New(clientId, clientSecret, apiKey, cacheFile string,
 	}
 
 	transport := http.DefaultTransport
-	if dumpHttp {
+	if dumpHTTP {
 		transport = loggingTransport{transport: transport, gd: &gd}
 	}
 	if apiKey != "" {
