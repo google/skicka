@@ -879,6 +879,8 @@ func (gd *GDrive) UpdateProperty(f *drive.File, key string, value string) error 
 
 	if prop == nil {
 		prop = &drive.Property{Key: key, Value: value}
+	} else {
+		prop.Value = value
 	}
 
 	for try := 0; ; try++ {
