@@ -91,7 +91,8 @@ func download(args []string) int {
 			localPath = path.Join(localPath, filepath.Base(drivePath))
 		}
 
-		err = syncOneFileDown(gdrive.File{drivePath, files[0]}, localPath, trustTimes)
+		err = syncOneFileDown(gdrive.File{Path: drivePath, File: files[0]}, localPath,
+			trustTimes)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "skicka: %s: %s\n", drivePath, err)
 			errs++
@@ -150,7 +151,7 @@ func syncHierarchyDown(driveBasePath string, localBasePath string, trustTimes bo
 	// here.
 	uniqueDriveFiles, dupes := filesOnDrive.GetSortedUnique()
 	nDownloadErrors := int32(len(dupes))
-	for f := range dupes {
+	for _, f := range dupes {
 		fmt.Fprintf(os.Stderr, "skicka: %s: skipping download of duplicate "+
 			"file on Drive\n", f)
 	}
@@ -282,7 +283,7 @@ func createPathMap(files []gdrive.File, localBasePath, driveBasePath string) map
 		if len(f.Path) > len(driveBasePath) {
 			localPath = path.Join(localPath, f.Path[len(driveBasePath):])
 		}
-		debug.Printf("Drive file %s [id %d] -> local %s", f.Path, f.File.Id, localPath)
+		debug.Printf("Drive file %s [id %s] -> local %s", f.Path, f.File.Id, localPath)
 		m[f.File.Id] = localPath
 	}
 	return m

@@ -67,7 +67,8 @@ func TestThatProgressBarCanRewindProgress(t *testing.T) {
 	read, _ = bcr.Read(dst)
 	if len(dst) != read || nBytesToDownload != int64(bcr.bytesRead) {
 		t.Fatalf("Expected to read %d bytes but read %d byte[s] and "+
-			"to accumulate %d bytes but accumulated %d byte[s]", len(dst), nBytesToDownload)
+			"to accumulate %d bytes but accumulated %d byte[s]", len(dst), read,
+			nBytesToDownload, bcr.bytesRead)
 	}
 }
 
