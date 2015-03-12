@@ -36,17 +36,6 @@ import (
 	"time"
 )
 
-type byteCountingReader struct {
-	R         io.Reader
-	bytesRead int64
-}
-
-func (bcr *byteCountingReader) Read(dst []byte) (int, error) {
-	read, err := bcr.R.Read(dst)
-	bcr.bytesRead += int64(read)
-	return read, err
-}
-
 func uploadUsage() {
 	fmt.Printf("Usage: skicka upload [-ignore-times] [-encrypt] local_path drive_path\n")
 	fmt.Printf("Run \"skicka help\" for more detailed help text.\n")

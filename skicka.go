@@ -154,6 +154,19 @@ func (fc *fileCloser) Close() error {
 	return fc.C.Close()
 }
 
+// byteCountingReader keeps tracks of how many bytes are actually read via
+// Read() calls.
+type byteCountingReader struct {
+	R         io.Reader
+	bytesRead int64
+}
+
+func (bcr *byteCountingReader) Read(dst []byte) (int, error) {
+	read, err := bcr.R.Read(dst)
+	bcr.bytesRead += int64(read)
+	return read, err
+}
+
 ///////////////////////////////////////////////////////////////////////////
 // Small utility functions
 

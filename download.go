@@ -513,15 +513,20 @@ func downloadDriveFile(writer io.Writer, driveFile *drive.File) error {
 		r = makeDecryptionReader(key, iv, r)
 	}
 
+	// Wrap the reader so that we can count how many bytes are read (in
+	// case we error out in the middle of the download and don't read
+	// everything.)
+	bcr := &byteCountingReader{R: r}
+
 	// And here's where the magic happens.
-	contentsLength, err := io.Copy(writer, r)
+	_, err = io.Copy(writer, bcr)
 
-	atomic.AddInt64(&stats.DownloadBytes, contentsLength)
-	atomic.AddInt64(&stats.DiskWriteBytes, contentsLength)
-
+	atomic.AddInt64(&stats.DownloadBytes, bcr.bytesRead)
+	atomic.AddInt64(&stats.DiskWriteBytes, bcr.bytesRead)
 	if err == nil {
 		atomic.AddInt64(&stats.LocalFilesUpdated, 1)
 	}
+
 	return err
 }
 
