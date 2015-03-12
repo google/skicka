@@ -113,7 +113,6 @@ func (l2r localToRemoteBySize) Less(i, j int) bool {
 // appropriately.
 func syncFileUp(localPath string, stat os.FileInfo, drivePath string, encrypt bool,
 	files gdrive.Files, pb *pb.ProgressBar) error {
-	// We need to create the file or folder on Google Drive.
 	debug.Printf("syncFileUp: %s -> %s", localPath, drivePath)
 
 	// Get the *drive.File for the folder to create the new file in.
@@ -132,9 +131,9 @@ func syncFileUp(localPath string, stat os.FileInfo, drivePath string, encrypt bo
 	var driveFile *drive.File
 
 	if stat.IsDir() {
-		// We only get here if the folder doesn't exist at all; if it
-		// already exists, we just update the metadata and don't go through
-		// this path.
+		// We only get here if the folder doesn't exist at all on Drive; if
+		// it already exists, we update the metadata earlier and don't go
+		// through this path.
 		driveFile, err = createDriveFolder(baseName, stat.Mode(), stat.ModTime(),
 			parentFolder)
 		checkFatalError(err, fmt.Sprintf("%s: create folder", drivePath))
@@ -143,25 +142,27 @@ func syncFileUp(localPath string, stat os.FileInfo, drivePath string, encrypt bo
 		atomic.AddInt64(&stats.UploadBytes, stat.Size())
 		verbose.Printf("Created Google Drive folder %s", drivePath)
 
-		// We actually only update the map when we create new folders; we
-		// don't update it for new files.  There are two reasons for this:
-		// first, once we've created a file, we don't access it again
-		// during a given run of skicka.  Second, file upload is
-		// multi-threaded, and would require a mutex to the map, which
-		// doesn't seem worth the trouble given the first reason.
+		// Update the representation of the Google Drive that exist to
+		// account for the new folder.
 		files.Add(drivePath, driveFile)
 	} else {
-		// Create an empty file on Google Drive if it doesn't already
-		// exist.
+		// We're uploading a file.  Create an empty file on Google Drive if
+		// it doesn't already exist. We explicitly set the modification
+		// time of the file to the start of the Unix epoch, so that if the
+		// download fails partway through, then we won't later be confused
+		// about which file is the correct one from having local and Drive
+		// copies with the same time but different contents.
 		if driveFile, err = files.GetOne(drivePath); err == gdrive.ErrNotExist {
-			driveFile, err = createDriveFile(baseName, stat.Mode(), stat.ModTime(),
+			driveFile, err = createDriveFile(baseName, stat.Mode(), time.Unix(0, 0),
 				encrypt, parentFolder)
 			if err != nil {
 				return err
 			}
 		}
 
-		// And now upload the contents of the file.
+		// And now upload the contents of the file, either overwriting the
+		// contents of the existing file, or adding contents to the
+		// just-created file.
 		err = uploadFileContents(localPath, driveFile, encrypt, pb)
 		if err != nil {
 			return err
@@ -169,6 +170,9 @@ func syncFileUp(localPath string, stat os.FileInfo, drivePath string, encrypt bo
 	}
 
 	verbose.Printf("Updated local %s -> Google Drive %s", localPath, drivePath)
+
+	// Only update the modification time on Google Drive to match the local
+	// modification time after the upload has finished successfully.
 	return gd.UpdateModificationTime(driveFile, stat.ModTime())
 }
 
@@ -271,7 +275,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 	}
 
 	// Now sort the directories by name, which ensures that the parent of each
-	// directory is available if we need to create its children.
+	// directory has already been created if we need to create its children.
 	sort.Strings(directoryNames)
 
 	if len(directoryNames) > 0 {
@@ -282,13 +286,15 @@ func syncHierarchyUp(localPath string, driveRoot string,
 		dirProgressBar.Prefix("Directories: ")
 		dirProgressBar.Start()
 
-		// And finally sync the directories, which serves to create any missing ones.
+		// Sync each of the directories, which serves to create any missing ones.
 		for _, dirName := range directoryNames {
 			file := directoryMappingMap[dirName]
 			err := syncFileUp(file.LocalPath, file.LocalFileInfo, file.DrivePath, encrypt,
 				existingFiles, dirProgressBar)
 			if err != nil {
-				nUploadErrors++
+				// Errors creating directories are basically unrecoverable,
+				// as they'll prevent us from later uploading any files in
+				// them.
 				printErrorAndExit(fmt.Errorf("%s: %v", file.LocalPath, err))
 			}
 			updateActiveMemory()
@@ -327,7 +333,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 
 		if err := syncFileUp(fm.LocalPath, fm.LocalFileInfo, fm.DrivePath, encrypt,
 			existingFiles, fileProgressBar); err != nil {
-			atomic.AddInt32(&nUploadErrors, 1)
+			nUploadErrors++
 			fmt.Fprintf(os.Stderr, "\nskicka: %s: %v\n", fm.LocalPath, err)
 		}
 		updateActiveMemory()
@@ -380,6 +386,7 @@ func syncHierarchyUp(localPath string, driveRoot string,
 
 			fm := fileMappings[index]
 			if fm.LocalFileInfo.IsDir() {
+				// Directories have already been taken care of.
 				continue
 			}
 
@@ -438,18 +445,27 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 		return false, nil
 	}
 
+	// See if the file exists: if not, then we definitely need to do the
+	// upload.
 	driveFile, err := files.GetOne(drivePath)
 	if err == gdrive.ErrNotExist {
 		debug.Printf("drive file %s doesn't exist -> needs upload", drivePath)
 		return true, nil
 	} else if err == gdrive.ErrMultipleFiles {
+		// If there are multiple files with this name on Drive (as is
+		// allowed), then we're going to ignore this file, since it's non
+		// obvious what the right thing to do it.
 		fmt.Fprintf(os.Stderr, "skicka: %s: multiple files/folders with this name exist "+
 			"in Google Drive. Skipping all files in this hierarchy.\n",
 			drivePath)
 		return false, nil
 	} else if err != nil {
+		// Some other error.
 		return false, err
 	}
+
+	// At this point, we know that a file with the corresponding pathname
+	// exists on Drive.
 
 	// Error out if there's a mismatch on file-ness and folder-ness between
 	// local and Drive.
@@ -462,14 +478,16 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 			localPath, drivePath)
 	}
 
-	// The file already exists on Drive; first make sure it has all of the
-	// properties that we expect.
+	// With that check out of the way, take the opportunity to make sure
+	// the file has all of the properties that we expect.
 	if err = createMissingProperties(driveFile, stat.Mode(), encrypt); err != nil {
 		return false, err
 	}
 
 	// Go ahead and update the file's permissions if they've changed.
-	if err := updatePermissions(driveFile, stat.Mode()); err != nil {
+	bitsString := fmt.Sprintf("%#o", stat.Mode()&os.ModePerm)
+	err = gd.UpdateProperty(driveFile, "Permissions", bitsString)
+	if err != nil {
 		return false, err
 	}
 
@@ -508,7 +526,7 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 	}
 
 	// Either the modification times differ or they're the same but we
-	// don't trust them.  Therefore, we'll no go through the work of
+	// don't trust them.  Therefore, we'll now go through the work of
 	// computing MD5 checksums of file contents to make a final decision.
 	var iv []byte
 	if encrypt {
@@ -523,7 +541,6 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 	if err != nil {
 		return false, err
 	}
-
 	if md5contents != driveFile.Md5Checksum {
 		// The contents of the local file and the remote file differ.
 
@@ -531,10 +548,11 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 			// We're running with -ignore-times, the modification times
 			// matched, but the file contents were different. This is both
 			// surprising and disturbing; it specifically suggests that
-			// either the file contents were modified without the file's
-			// modification time being updated, or that there was file
-			// corruption of some sort. We'll be conservative and not
-			// clobber the Drive file in case it was the latter.
+			// either the file contents were modified in one of the two
+			// places without the file's modification time being updated,
+			// or that there was file corruption of some sort. We'll be
+			// conservative and not clobber the Drive file in case it was
+			// the latter.
 			return true, fmt.Errorf("%s: has different contents versus Google "+
 				"Drive file %s, but doesn't have a newer timestamp. **Not updating"+
 				"the file on Drive**. Run 'touch' to update the file"+
@@ -545,9 +563,8 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 		return true, nil
 	}
 
-	// The timestamp of the local file is different, but the contents
-	// are unchanged versus what's on Drive, so just update the
-	// modified time on Drive if needed.
+	// The timestamp of the local file is different, but the checksums
+	// match, so just update the modified time on Drive.
 	return false, gd.UpdateModificationTime(driveFile, stat.ModTime())
 }
 
@@ -564,6 +581,9 @@ func compileUploadFileTree(localPath, drivePath string, existingFiles gdrive.Fil
 	if stat, err := os.Stat(localPath); err == nil && stat.IsDir() == false {
 		driveFile, err := gd.GetFile(drivePath)
 		if err == nil && gdrive.IsFolder(driveFile) {
+			// The local path is for a file and the Drive path is for a
+			// folder; update the drive path to end with the base of the
+			// local filename.
 			drivePath = filepath.Join(drivePath, filepath.Base(localPath))
 		}
 		if encrypt {
@@ -572,13 +592,12 @@ func compileUploadFileTree(localPath, drivePath string, existingFiles gdrive.Fil
 
 		upload, err := fileNeedsUpload(localPath, drivePath, stat, existingFiles,
 			encrypt, trustTimes)
-		if upload && err == nil {
-			fileMappings = append(fileMappings,
-				localToRemoteFileMapping{localPath, drivePath, stat})
-		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "skicka: %s", err)
 			nUploadErrors++
+		} else if upload {
+			fileMappings = append(fileMappings,
+				localToRemoteFileMapping{localPath, drivePath, stat})
 		}
 		return fileMappings, nUploadErrors
 	}
@@ -604,13 +623,12 @@ func compileUploadFileTree(localPath, drivePath string, existingFiles gdrive.Fil
 
 			upload, err := fileNeedsUpload(path, drivePath, stat, existingFiles,
 				encrypt, trustTimes)
-			if upload && err == nil {
-				fileMappings = append(fileMappings,
-					localToRemoteFileMapping{path, drivePath, stat})
-			}
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "skicka: %s", err)
 				nUploadErrors++
+			} else if upload {
+				fileMappings = append(fileMappings,
+					localToRemoteFileMapping{path, drivePath, stat})
 			}
 
 			// Always return nil: we don't want to stop walking the
@@ -631,8 +649,8 @@ func compileUploadFileTree(localPath, drivePath string, existingFiles gdrive.Fil
 // don't have the various properties we expect. Check for that now
 // and patch things up as needed.
 func createMissingProperties(f *drive.File, mode os.FileMode, encrypt bool) error {
-	if !gdrive.IsFolder(f) {
-		if encrypt {
+	if !gdrive.IsFolder(f) && encrypt {
+		if f.FileSize == 0 {
 			if _, err := gdrive.GetProperty(f, "IV"); err != nil {
 				// Compute a unique IV for the file.
 				iv := getRandomBytes(aes.BlockSize)
@@ -645,6 +663,19 @@ func createMissingProperties(f *drive.File, mode os.FileMode, encrypt bool) erro
 					return err
 				}
 			}
+		} else {
+			// This is state of affairs really shouldn't ever happen, but
+			// if somehow it does, it's important that we catch it: the
+			// file is missing the IV property, but has some
+			// contents. Presumably the IV is at the start of the file
+			// contents and we could initialize the property from that
+			// here, but any successfully created file should already have
+			// the property, so we'll just error out, since it's not clear
+			// what's going on here...
+			return fmt.Errorf("encrypted file on Drive is missing" +
+				"IV property, but has non-zero length. Can't create the IV" +
+				"property without examining file contents.")
+
 		}
 	}
 	if _, err := gdrive.GetProperty(f, "Permissions"); err != nil {
@@ -683,10 +714,4 @@ func createDriveFolder(title string, mode os.FileMode, modTime time.Time,
 		Value: fmt.Sprintf("%#o", mode&os.ModePerm)})
 
 	return gd.InsertNewFolder(title, parentFolder, modTime, proplist)
-}
-
-func updatePermissions(driveFile *drive.File, mode os.FileMode) error {
-	bits := mode & os.ModePerm
-	bitsString := fmt.Sprintf("%#o", bits)
-	return gd.UpdateProperty(driveFile, "Permissions", bitsString)
 }

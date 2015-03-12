@@ -92,7 +92,10 @@ func download(args []string) int {
 		}
 
 		err = syncOneFileDown(gdrive.File{drivePath, files[0]}, localPath, trustTimes)
-		checkFatalError(err, "")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "skicka: %s: %s\n", drivePath, err)
+			errs++
+		}
 	}
 
 	printFinalStats()
@@ -299,16 +302,15 @@ func downloadFile(f gdrive.File, filePath string, progressBar *pb.ProgressBar) e
 	if err != nil {
 		return err
 	}
+	defer writeCloser.Close()
 
-	// Also tee writes to the progress bar, which provides the
-	// Writer interface and updates itself according to the number
-	// of bytes that it sees.
+	// Tee writes to the progress bar, which provides the Writer interface
+	// and updates itself according to the number of bytes that it sees.
 	multiwriter := io.MultiWriter(writeCloser, progressBar)
 
 	// FIXME: downloadDriveFile needs a name that better distinguishes its
 	// function from downloadFile.
 	if err := downloadDriveFile(multiwriter, f.File); err != nil {
-		writeCloser.Close()
 		// Remove the incomplete file from the failed download.
 		_ = os.Remove(filePath)
 		return err
@@ -318,7 +320,6 @@ func downloadFile(f gdrive.File, filePath string, progressBar *pb.ProgressBar) e
 		filePath)
 	updateActiveMemory()
 
-	writeCloser.Close()
 	return updateModificationTime(filePath, f.File)
 }
 
@@ -353,7 +354,8 @@ func createLocalDirectories(localPathMap map[string]string, files []gdrive.File)
 					return err
 				}
 			} else {
-				return fmt.Errorf("%s: is a regular file", dirPath)
+				return fmt.Errorf("%s: is a regular file but %s on Google Drive is a folder",
+					dirPath, f.Path)
 			}
 		} else {
 			verbose.Printf("Creating directory %s for %s with permissions %#o",
@@ -391,8 +393,9 @@ func isEncrypted(file *drive.File) (bool, error) {
 }
 
 // fileNeedsDownload returns true if the given *drive.File is more recent
-// than the corresponding local file (if any) and should be
-// downloaded.
+// than the corresponding local file (if any) and should be downloaded. It
+// tries to do the inexpensive tests first, before going to the trouble of
+// comparing file contents.
 func fileNeedsDownload(localPath string, drivePath string, driveFile *drive.File,
 	trustTimes bool) (bool, error) {
 	// See if the local version of the file exists at all.
