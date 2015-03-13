@@ -651,8 +651,8 @@ func compileUploadFileTree(localPath, drivePath string, existingFiles gdrive.Fil
 // and patch things up as needed.
 func createMissingProperties(f *drive.File, mode os.FileMode, encrypt bool) error {
 	if !gdrive.IsFolder(f) && encrypt {
-		if f.FileSize == 0 {
-			if _, err := gdrive.GetProperty(f, "IV"); err != nil {
+		if _, err := gdrive.GetProperty(f, "IV"); err != nil {
+			if f.FileSize == 0 {
 				// Compute a unique IV for the file.
 				iv := getRandomBytes(aes.BlockSize)
 				ivhex := hex.EncodeToString(iv)
@@ -663,20 +663,19 @@ func createMissingProperties(f *drive.File, mode os.FileMode, encrypt bool) erro
 				if err != nil {
 					return err
 				}
+			} else {
+				// This is state of affairs really shouldn't ever happen, but
+				// if somehow it does, it's important that we catch it: the
+				// file is missing the IV property, but has some
+				// contents. Presumably the IV is at the start of the file
+				// contents and we could initialize the property from that
+				// here, but any successfully created file should already have
+				// the property, so we'll just error out, since it's not clear
+				// what's going on here...
+				return fmt.Errorf("encrypted file on Drive is missing" +
+					"IV property, but has non-zero length. Can't create the IV " +
+					"property without examining file contents.")
 			}
-		} else {
-			// This is state of affairs really shouldn't ever happen, but
-			// if somehow it does, it's important that we catch it: the
-			// file is missing the IV property, but has some
-			// contents. Presumably the IV is at the start of the file
-			// contents and we could initialize the property from that
-			// here, but any successfully created file should already have
-			// the property, so we'll just error out, since it's not clear
-			// what's going on here...
-			return fmt.Errorf("encrypted file on Drive is missing" +
-				"IV property, but has non-zero length. Can't create the IV" +
-				"property without examining file contents.")
-
 		}
 	}
 	if _, err := gdrive.GetProperty(f, "Permissions"); err != nil {
