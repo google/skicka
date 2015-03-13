@@ -33,6 +33,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -327,6 +328,11 @@ func downloadFile(f gdrive.File, filePath string, progressBar *pb.ProgressBar) e
 // Create all of the directories on the local filesystem for the folders in
 // the given array of gdrive.Files.
 func createLocalDirectories(localPathMap map[string]string, files []gdrive.File) error {
+	// Override the currently set umask value for this function; we'd like
+	// to set permissions precisely as they are on Drive.
+	oldmask := syscall.Umask(0)
+	defer syscall.Umask(oldmask)
+
 	for _, f := range files {
 		if !gdrive.IsFolder(f.File) {
 			continue
