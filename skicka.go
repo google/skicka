@@ -329,13 +329,6 @@ func getFileContentsReaderForUpload(path string, encrypt bool,
 	return f, fileSize, nil
 }
 
-func pathSeparator() string {
-	if runtime.GOOS == "windows" {
-		return "\\"
-	}
-	return "/"
-}
-
 ///////////////////////////////////////////////////////////////////////////
 // Encryption/decryption
 

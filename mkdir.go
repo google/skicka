@@ -59,7 +59,7 @@ func mkdir(args []string) int {
 		drivePath := filepath.Clean(args[i])
 
 		parent := root
-		dirs := strings.Split(drivePath, pathSeparator())
+		dirs := strings.Split(drivePath, string(os.PathSeparator))
 		nDirs := len(dirs)
 		pathSoFar := ""
 		// Walk through the directories in the path in turn.

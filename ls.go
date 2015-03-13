@@ -82,7 +82,7 @@ func ls(args []string) int {
 	}
 
 	if len(argFilenames) == 0 {
-		argFilenames = append(argFilenames, pathSeparator())
+		argFilenames = append(argFilenames, string(os.PathSeparator))
 	}
 
 	errs := 0
@@ -113,7 +113,7 @@ func ls(args []string) int {
 				printFilename = filepath.Base(printFilename)
 			}
 			if gdrive.IsFolder(f.File) {
-				printFilename += pathSeparator()
+				printFilename += string(os.PathSeparator)
 			}
 			if long || longlong {
 				synctime, _ := gdrive.GetModificationTime(f.File)

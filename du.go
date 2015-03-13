@@ -29,7 +29,7 @@ import (
 
 func du(args []string) int {
 	if len(args) == 0 {
-		args = append(args, pathSeparator())
+		args = append(args, string(os.PathSeparator))
 	}
 
 	errs := 0
@@ -66,10 +66,10 @@ func du(args []string) int {
 				sz := f.File.FileSize
 				totalSize += sz
 				dirName := filepath.Clean(filepath.Dir(f.Path))
-				for ; dirName != pathSeparator() && dirName != "."; dirName = filepath.Dir(dirName) {
+				for ; dirName != string(os.PathSeparator) && dirName != "."; dirName = filepath.Dir(dirName) {
 					folderSize[dirName] += sz
 				}
-				folderSize[pathSeparator()] += sz
+				folderSize[string(os.PathSeparator)] += sz
 			}
 		}
 
