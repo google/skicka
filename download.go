@@ -550,6 +550,12 @@ func getLocalWriterForDriveFile(localPath string,
 		localPath = strings.TrimSuffix(localPath, encryptionSuffix)
 	}
 
+	// Remove the local file, if it exists.
+	err = os.Remove(localPath)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+
 	// Create or overwrite the local file.
 	f, err := os.Create(localPath)
 	if err != nil {
