@@ -285,6 +285,12 @@ func createPathMap(files []gdrive.File, localBasePath, driveBasePath string) map
 			localPath = path.Join(localPath, f.Path[len(driveBasePath):])
 		}
 		debug.Printf("Drive file %s [id %s] -> local %s", f.Path, f.File.Id, localPath)
+
+		encrypted, _ := isEncrypted(f.File)
+		if encrypted {
+			localPath = strings.TrimSuffix(localPath, encryptionSuffix)
+		}
+
 		m[f.File.Id] = localPath
 	}
 	return m
@@ -542,16 +548,8 @@ func downloadDriveFile(writer io.Writer, driveFile *drive.File) error {
 
 func getLocalWriterForDriveFile(localPath string,
 	driveFile *drive.File) (io.WriteCloser, error) {
-	encrypted, err := isEncrypted(driveFile)
-	if err != nil {
-		return nil, err
-	}
-	if encrypted {
-		localPath = strings.TrimSuffix(localPath, encryptionSuffix)
-	}
-
 	// Remove the local file, if it exists.
-	err = os.Remove(localPath)
+	err := os.Remove(localPath)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
