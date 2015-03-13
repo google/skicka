@@ -503,7 +503,7 @@ func downloadDriveFile(writer io.Writer, driveFile *drive.File) error {
 		// Read the initialization vector from the start of the file.
 		iv := make([]byte, 16)
 		n, err := contentsReader.Read(iv)
-		if err != nil {
+		if err != nil && err != io.EOF {
 			return err
 		}
 		if n < aes.BlockSize {
