@@ -213,6 +213,7 @@ func uploadFileContents(localPath string, driveFile *drive.File, encrypt bool,
 		} else {
 			err = gd.UploadFileContents(driveFile, uploadReader, length, ntries)
 		}
+		atomic.AddInt64(&stats.DiskReadBytes, countingReader.bytesRead)
 
 		if err == nil {
 			// Success!
