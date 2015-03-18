@@ -40,8 +40,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -49,6 +49,81 @@ import (
 )
 
 const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
+
+///////////////////////////////////////////////////////////////////////////
+
+// File represents a file or folder in Google Drive.
+type File struct {
+	Path      string
+	driveFile *drive.File
+}
+
+// Size returns the size in bytes of the file on Google Drive.
+func (f File) Size() int64 {
+	return f.driveFile.FileSize
+}
+
+// ModTime returns the modification time of the given Google Drive file as
+// a time.Time.
+func (f File) ModTime() (time.Time, error) {
+	if f.driveFile.ModifiedDate != "" {
+		return time.Parse(time.RFC3339Nano, f.driveFile.ModifiedDate)
+	}
+	return time.Unix(0, 0), nil
+}
+
+// Id returns the unique identifier associated with the file on Google
+// Drive.
+func (f File) Id() string {
+	return f.driveFile.Id
+}
+
+// MD5 returns the MD5 hash of the contents of the file.
+func (f File) MD5() string {
+	return f.driveFile.Md5Checksum
+}
+
+// IsFolder returns a boolean indicating whether the given File is a
+// folder.
+func (f File) IsFolder() bool {
+	return f.driveFile.MimeType == "application/vnd.google-apps.folder"
+}
+
+// Property represents a user-specified property associated with a Drive
+// file.
+type Property struct {
+	Key, Value string
+}
+
+// Properties returns an (unsorted) array of all of the properties
+// associated with the file on Google Drive.
+func (f File) Properties() []Property {
+	var p []Property
+	for _, prop := range f.driveFile.Properties {
+		p = append(p, Property{Key: prop.Key, Value: prop.Value})
+	}
+	return p
+}
+
+// GetProperty returns the property of the given name associated with the
+// given file, if the named property is present.  If the property isn't
+// present in the fie, then an empty string and an error are returned.
+func (f File) GetProperty(name string) (string, error) {
+	for _, prop := range f.driveFile.Properties {
+		if prop.Key == name {
+			return prop.Value, nil
+		}
+	}
+	return "", fmt.Errorf("%s: property not found", name)
+}
+
+// Helper declarations to be able to sort an array of File values by
+// pathname.
+type byPath []File
+
+func (a byPath) Len() int           { return len(a) }
+func (a byPath) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a byPath) Less(i, j int) bool { return a[i].Path < a[j].Path }
 
 ///////////////////////////////////////////////////////////////////////////
 
@@ -92,10 +167,9 @@ func launchBandwidthTask(bytesPerSecond int) {
 	defer bandwidthMutex.Unlock()
 	if bandwidthTaskRunning {
 		return
-	} else {
-		bandwidthTaskRunning = true
 	}
 
+	bandwidthTaskRunning = true
 	go func() {
 		for {
 			bandwidthMutex.Lock()
@@ -448,14 +522,6 @@ func (lt loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	return resp, err
 }
 
-func pathSeparator() string {
-	if runtime.GOOS == "windows" {
-		return "\\"
-	} else {
-		return "/"
-	}
-}
-
 ///////////////////////////////////////////////////////////////////////////
 // Public Interface
 
@@ -519,11 +585,11 @@ func New(clientId, clientSecret, apiKey, cacheFile string,
 
 // AddProperty adds the property with given key and value to the provided
 // file and updates the file in Google Drive.
-func (gd *GDrive) AddProperty(key, value string, f *drive.File) error {
+func (gd *GDrive) AddProperty(key, value string, f File) error {
 	prop := &drive.Property{Key: key, Value: value}
 
 	for try := 0; ; try++ {
-		_, err := gd.svc.Properties.Insert(f.Id, prop).Do()
+		_, err := gd.svc.Properties.Insert(f.driveFile.Id, prop).Do()
 		if err == nil {
 			return nil
 		} else if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
@@ -533,29 +599,18 @@ func (gd *GDrive) AddProperty(key, value string, f *drive.File) error {
 	}
 }
 
-// GetProperty returns the property of the given name associated with the
-// given file, if the named property is present.  If the property isn't
-// present in the fie, then an empty string and an error are returned.
-func GetProperty(f *drive.File, name string) (string, error) {
-	for _, prop := range f.Properties {
-		if prop.Key == name {
-			return prop.Value, nil
-		}
-	}
-	return "", fmt.Errorf("%s: property not found", name)
-}
-
-// GetFile returns the *drive.File corresponding to a file or folder
-// specified by the given path starting from the root of the Google Drive
-// filesystem.  (Note that *drive.File is used to represent both files and
-// folders in Google Drive.)
-func (gd *GDrive) GetFile(path string) (*drive.File, error) {
-	parent, err := gd.getFileById("root")
+// GetFile returns the File corresponding to a file or folder specified by
+// the given path starting from the root of the Google Drive filesystem.
+// (Note that File is used to represent both files and folders in Google
+// Drive.)
+func (gd *GDrive) GetFile(path string) (File, error) {
+	rootFile, err := gd.getFileById("root")
 	if err != nil {
-		return nil, fmt.Errorf("unable to get Drive root directory: %v", err)
+		return File{}, fmt.Errorf("unable to get Drive root directory: %v", err)
 	}
 
-	dirs := strings.Split(path, pathSeparator())
+	dirs := strings.Split(path, string(os.PathSeparator))
+	f := File{Path: "/", driveFile: rootFile}
 	// Walk through the directories in the path in turn.
 	for _, dir := range dirs {
 		if dir == "" {
@@ -564,43 +619,44 @@ func (gd *GDrive) GetFile(path string) (*drive.File, error) {
 			continue
 		}
 
-		file, err := gd.GetFileInFolder(dir, parent)
+		f, err = gd.GetFileInFolder(dir, f)
 		if err != nil {
-			return nil, err
+			return File{}, err
 		}
-		parent = file
 	}
-	return parent, nil
+	return f, nil
 }
 
-// GetFiles returns drive.File pointers for *all* of the files in Google
-// Drive that correspond to the given path. Because Google Drive allows
-// multiple files to have the same title (and allows multiple folders of
-// the same name), this is more complicated than it might seen.
+// GetFiles returns File structures for *all* of the files in Google Drive
+// that correspond to the given path. Because Google Drive allows multiple
+// files to have the same title (and allows multiple folders of the same
+// name), this is more complicated than it might seen.
 //
 // Note: an error is not returned if the file doesn't exist; the caller
 // should detect that case by detecting a zero-length returned array for
 // that case.
-func (gd *GDrive) GetFiles(path string) ([]*drive.File, error) {
+func (gd *GDrive) GetFiles(path string) ([]File, error) {
+	path = filepath.Clean(path)
+
 	root, err := gd.getFileById("root")
 	if err != nil {
 		return nil, fmt.Errorf("unable to get Drive root directory: %v", err)
 	}
 	// Special case the root directory.
 	if path == "/" || path == "\\" {
-		files := make([]*drive.File, 1)
-		files[0] = root
+		files := make([]File, 1)
+		files[0] = File{Path: path, driveFile: root}
 		return files, nil
 	}
 
-	components := strings.Split(path, pathSeparator())
+	components := strings.Split(path, string(os.PathSeparator))
 	if components[0] == "" {
 		// The first string in the split is "" if the path starts with a
 		// '/', so skip over that directory component.
 		components = components[1:]
 	}
-	var files []*drive.File
-	err = gd.getFilesRecursive(components, root, &files)
+	var files []File
+	err = gd.getFilesRecursive(components, root, path, &files)
 	return files, err
 }
 
@@ -608,7 +664,7 @@ func (gd *GDrive) GetFiles(path string) ([]*drive.File, error) {
 // folder, return all of the files under the parent that correspond to the
 // given path.
 func (gd *GDrive) getFilesRecursive(components []string, parent *drive.File,
-	files *[]*drive.File) error {
+	path string, files *[]File) error {
 	if len(components) == 0 {
 		return nil
 	}
@@ -624,9 +680,9 @@ func (gd *GDrive) getFilesRecursive(components []string, parent *drive.File,
 		if len(components) == 1 {
 			// We've reached the last component of the path, so have
 			// finally found a matching file.
-			*files = append(*files, f)
+			*files = append(*files, File{Path: path, driveFile: f})
 		} else {
-			err = gd.getFilesRecursive(components[1:], f, files)
+			err = gd.getFilesRecursive(components[1:], f, path, files)
 			if err != nil {
 				return err
 			}
@@ -635,11 +691,11 @@ func (gd *GDrive) getFilesRecursive(components []string, parent *drive.File,
 	return nil
 }
 
-// GetFilesInFolder returns an array of *drive.File values, one for each
+// getFilesInFolder returns an array of *drive.File values, one for each
 // file in the given folder with the given name.
-func (gd *GDrive) GetFilesInFolder(name string, folder *drive.File) ([]*drive.File, error) {
+func (gd *GDrive) GetFilesInFolder(name string, folder File) ([]File, error) {
 	query := fmt.Sprintf("title='%s' and '%s' in parents and trashed=false",
-		name, folder.Id)
+		name, folder.driveFile.Id)
 	files, err := gd.runQuery(query)
 	if err != nil {
 		return nil, err
@@ -648,18 +704,23 @@ func (gd *GDrive) GetFilesInFolder(name string, folder *drive.File) ([]*drive.Fi
 	if len(files) == 0 {
 		return nil, ErrNotExist
 	}
-	return files, nil
+
+	var fa []File
+	for _, f := range files {
+		fa = append(fa, File{Path: filepath.Join(folder.Path, name), driveFile: f})
+	}
+	return fa, nil
 }
 
-// GetFileInFolder returns a single *drive.File for the given filename in
-// the given folder.  An error is returned if multiple files in that folder
-// all have the same name.
-func (gd *GDrive) GetFileInFolder(name string, folder *drive.File) (*drive.File, error) {
+// GetFileInFolder returns a single File for the given filename in the
+// given folder.  An error is returned if multiple files in that folder all
+// have the same name.
+func (gd *GDrive) GetFileInFolder(name string, folder File) (File, error) {
 	files, err := gd.GetFilesInFolder(name, folder)
 	if err != nil {
-		return nil, err
+		return File{}, err
 	} else if len(files) > 1 {
-		return nil, ErrMultipleFiles
+		return File{}, ErrMultipleFiles
 	}
 	return files[0], nil
 }
@@ -667,41 +728,42 @@ func (gd *GDrive) GetFileInFolder(name string, folder *drive.File) (*drive.File,
 // Files represents a cached mapping between pathnames and files stored in
 // Google Drive.
 type Files struct {
-	files map[string][]*drive.File
+	files map[string][]File
 }
 
 func newFiles() Files {
 	var f Files
-	f.files = make(map[string][]*drive.File)
+	f.files = make(map[string][]File)
 	return f
 }
 
-// Add takes a pathname and a *drive.File and records that the given file
-// lives at the given path in Google Drive.
-func (f Files) Add(path string, df *drive.File) {
-	f.files[path] = append(f.files[path], df)
+// Add takes a pathname and a File and records that the given file lives at
+// the given path in Google Drive.
+func (f Files) Add(file File) {
+	f.files[file.Path] = append(f.files[file.Path], file)
 }
 
-// GetOne returns a single *drive.File for the given path, if a file with
-// that name exists on Google Drive.  It returns the error ErrNotExist if
-// no such file exists, and ErrMultipleFiles if multiple files with that
+// GetOne returns a single File for the given path, if a file with that
+// name exists on Google Drive.  It returns the error ErrNotExist if no
+// such file exists, and ErrMultipleFiles if multiple files with that
 // pathname exist.
-func (f Files) GetOne(path string) (*drive.File, error) {
+func (f Files) GetOne(path string) (File, error) {
 	if path == "." {
 		path = "/"
 	}
 	fs, ok := f.files[path]
 	if !ok {
-		return nil, ErrNotExist
+		return File{}, ErrNotExist
 	} else if len(fs) > 1 {
-		return nil, ErrMultipleFiles
+		return File{}, ErrMultipleFiles
 	}
 	return fs[0], nil
 }
 
-// Get returns all of the *drive.Files that are named by the given path.
-// If no such file exists, it returns the ErrNotExist error cod.
-func (f Files) Get(path string) ([]*drive.File, error) {
+// GetAll returns all of the File structures for files on Drive that are named
+// by the given path.  If no such file exists, it returns the ErrNotExist
+// error code.
+func (f Files) GetAll(path string) ([]File, error) {
 	if path == "." {
 		path = "/"
 	}
@@ -712,47 +774,36 @@ func (f Files) Get(path string) ([]*drive.File, error) {
 	return fs, nil
 }
 
-// File represents the mapping between a full path and a single *drive.File
-// stored in Google Drive.
-type File struct {
-	Path string
-	File *drive.File
-}
-
-// Helper declarations to be able to sort an array of File values by
-// pathname.
-type byPath []File
-
-func (a byPath) Len() int           { return len(a) }
-func (a byPath) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
-func (a byPath) Less(i, j int) bool { return a[i].Path < a[j].Path }
-
-// GetSorted returns a array of File values, one for each Google Drive file
-// represented by the Files object.  The array is sorted by the files
+// GetSorted returns a array of File structures, one for each Google Drive
+// file represented by the Files object.  The array is sorted by the files
 // pathnames.
 func (f Files) GetSorted() []File {
 	var files []File
-	for path, fileArray := range f.files {
+	for _, fileArray := range f.files {
 		for _, f := range fileArray {
-			files = append(files, File{path, f})
+			files = append(files, f)
 		}
 	}
 	sort.Sort(byPath(files))
 	return files
 }
 
-func (f Files) GetSortedUnique() ([]File, []string) {
+// GetSortedUnique sorts all of the files by path name and then returns two
+// arrays of File structures.  The first includes all unique files--ones
+// that only have a single file with that pthname on Drive.  The second has
+// all files where there are two or more files with that name on Drive.
+func (f Files) GetSortedUnique() ([]File, []File) {
 	allFiles := f.GetSorted()
-	var dupes []string
-	var files []File
+
+	var dupes, files []File
 	for i, f := range allFiles {
 		// Non-duplicated files are different than their neighbors on both
 		// sides (if present).
 		if (i == 0 || f.Path != allFiles[i-1].Path) &&
 			(i == len(allFiles)-1 || f.Path != allFiles[i+1].Path) {
 			files = append(files, f)
-		} else if dupes == nil || dupes[len(dupes)-1] != f.Path {
-			dupes = append(dupes, f.Path)
+		} else if dupes == nil || dupes[len(dupes)-1].Path != f.Path {
+			dupes = append(dupes, f)
 		}
 	}
 
@@ -764,6 +815,8 @@ func (f Files) GetSortedUnique() ([]File, []string) {
 // parameter indicates whether the contents of folders under the given path
 // should be included and 'includeBase' indicates whether the file
 // corresponding to the given path's folder should be included.
+// 'mustExist' indicates whether an error should be returned if a file at
+// the given path doesn't exist.
 func (gd *GDrive) GetFilesUnderPath(path string,
 	recursive, includeBase, mustExist bool) (Files, error) {
 	files := newFiles()
@@ -779,34 +832,35 @@ func (gd *GDrive) GetFilesUnderPath(path string,
 	}
 
 	for _, f := range pathfiles {
-		if IsFolder(f) {
+		if f.IsFolder() {
 			if includeBase {
-				files.Add(path, f)
+				files.Add(f)
 			}
-			err := gd.getFolderContentsRecursive(path, f, recursive, &files)
+			err := gd.getFolderContentsRecursive(f, recursive, &files)
 			if err != nil {
 				return files, err
 			}
 		} else {
-			files.Add(path, f)
+			files.Add(f)
 		}
 	}
 	return files, nil
 }
 
-func (gd *GDrive) getFolderContentsRecursive(path string, parentFolder *drive.File,
-	recursive bool, files *Files) error {
-	query := fmt.Sprintf("trashed=false and '%s' in parents", parentFolder.Id)
+func (gd *GDrive) getFolderContentsRecursive(parentFolder File, recursive bool,
+	files *Files) error {
+	query := fmt.Sprintf("trashed=false and '%s' in parents",
+		parentFolder.driveFile.Id)
 	dirfiles, err := gd.runQuery(query)
 	if err != nil {
 		return err
 	}
 
 	for _, f := range dirfiles {
-		fp := filepath.Join(path, f.Title)
-		files.Add(fp, f)
-		if IsFolder(f) && recursive {
-			err := gd.getFolderContentsRecursive(fp, f, recursive, files)
+		df := File{Path: filepath.Join(parentFolder.Path, f.Title), driveFile: f}
+		files.Add(df)
+		if df.IsFolder() && recursive {
+			err := gd.getFolderContentsRecursive(df, recursive, files)
 			if err != nil {
 				return err
 			}
@@ -815,28 +869,22 @@ func (gd *GDrive) getFolderContentsRecursive(path string, parentFolder *drive.Fi
 	return nil
 }
 
-// IsFolder returns a boolean indicating whether the given *drive.File is a
-// folder.
-func IsFolder(f *drive.File) bool {
-	return f.MimeType == "application/vnd.google-apps.folder"
-}
-
 // GetFileContents returns an io.ReadCloser that provides the contents of
 // the given *drive.File.
-func (gd *GDrive) GetFileContents(f *drive.File) (io.ReadCloser, error) {
+func (gd *GDrive) GetFileContents(f File) (io.ReadCloser, error) {
 	// The file download URL expires some hours after it's retrieved;
 	// re-grab the file right before downloading it so that we have a
 	// fresh URL.
-	f, err := gd.getFileById(f.Id)
+	driveFile, err := gd.getFileById(f.driveFile.Id)
 	if err != nil {
 		return nil, err
 	}
 
-	url := f.DownloadUrl
+	url := driveFile.DownloadUrl
 	if url == "" {
-		// Google Drive files can't be downloaded directly via DownloadUrl,
+		// Google Docs files can't be downloaded directly via DownloadUrl,
 		// but can be exported to another format that can be downloaded.
-		url = f.ExportLinks[f.MimeType]
+		url = driveFile.ExportLinks[driveFile.MimeType]
 	}
 
 	for try := 0; ; try++ {
@@ -864,9 +912,9 @@ func (gd *GDrive) GetFileContents(f *drive.File) (io.ReadCloser, error) {
 
 // UpdateProperty updates the property with name 'name' to 'value' in
 // the given *drive.File on Google Drive.
-func (gd *GDrive) UpdateProperty(f *drive.File, key string, value string) error {
+func (gd *GDrive) UpdateProperty(f File, key string, value string) error {
 	var prop *drive.Property
-	for _, prop = range f.Properties {
+	for _, prop = range f.driveFile.Properties {
 		if prop.Key == key {
 			if prop.Value == value {
 				// Save the network round-trip and return, since the
@@ -884,7 +932,7 @@ func (gd *GDrive) UpdateProperty(f *drive.File, key string, value string) error 
 	}
 
 	for try := 0; ; try++ {
-		_, err := gd.svc.Properties.Update(f.Id, key, prop).Do()
+		_, err := gd.svc.Properties.Update(f.driveFile.Id, key, prop).Do()
 		if err == nil {
 			// success
 			return nil
@@ -902,7 +950,7 @@ func (gd *GDrive) UpdateProperty(f *drive.File, key string, value string) error 
 // the file.  The 'try' parameter should track how many times this function
 // has been called to try to upload the given file due to
 // RetryHTTPTransmitErrors.
-func (gd *GDrive) UploadFileContents(f *drive.File, contentsReader io.Reader,
+func (gd *GDrive) UploadFileContents(f File, contentsReader io.Reader,
 	length int64, try int) error {
 	// Limit upload bandwidth, if requested..
 	if gd.uploadBytesPerSecond > 0 {
@@ -915,7 +963,7 @@ func (gd *GDrive) UploadFileContents(f *drive.File, contentsReader io.Reader,
 	}
 
 	// Get the PUT request for the upload.
-	req, err := prepareUploadPUT(f, contentsReader, length)
+	req, err := prepareUploadPUT(f.driveFile, contentsReader, length)
 	if err != nil {
 		return err
 	}
@@ -932,7 +980,7 @@ func (gd *GDrive) UploadFileContents(f *drive.File, contentsReader io.Reader,
 
 	switch gd.handleHTTPResponse(resp, err, try) {
 	case Success:
-		gd.debug("Success for %s: code %d", f.Title, resp.StatusCode)
+		gd.debug("Success for %s: code %d", f.Path, resp.StatusCode)
 		return nil
 	case Fail:
 		if err == nil {
@@ -1216,14 +1264,14 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
 // for files under a few megabytes, but is helpful for large files in that
 // it's more robust to transient errors and can handle OAuth2 token
 // refreshes in the middle of an upload, unlike the regular approach.
-func (gd *GDrive) UploadFileContentsResumable(driveFile *drive.File,
+func (gd *GDrive) UploadFileContentsResumable(file File,
 	contentsReader io.Reader, contentLength int64) error {
 	contentsReader, contentType, err := detectContentType(contentsReader)
 	if err != nil {
 		return err
 	}
 
-	sessionURI, err := gd.getResumableUploadURI(driveFile, contentType,
+	sessionURI, err := gd.getResumableUploadURI(file.driveFile, contentType,
 		contentLength)
 	if err != nil {
 		return err
@@ -1246,7 +1294,7 @@ func (gd *GDrive) UploadFileContentsResumable(driveFile *drive.File,
 		if end > contentLength {
 			end = contentLength
 		}
-		gd.debug("%s: uploading chunk %d - %d...", driveFile.Title,
+		gd.debug("%s: uploading chunk %d - %d...", file.Path,
 			currentOffset, end)
 
 		// We should usually already be at the current offset; this
@@ -1281,7 +1329,7 @@ func (gd *GDrive) UploadFileContentsResumable(driveFile *drive.File,
 		resp, err := gd.oAuthTransport.RoundTrip(req)
 
 		status, err := gd.handleResumableUploadResponse(resp, err,
-			driveFile, contentType, contentLength, &try, &currentOffset,
+			file.driveFile, contentType, contentLength, &try, &currentOffset,
 			&sessionURI)
 
 		if resp != nil {
@@ -1305,10 +1353,10 @@ func (gd *GDrive) UploadFileContentsResumable(driveFile *drive.File,
 
 // UpdateModificationTime updates the modification time of the given Google
 // Drive file to the given time.
-func (gd *GDrive) UpdateModificationTime(f *drive.File, newTime time.Time) error {
-	gd.debug("updating modification time of %s to %v", f.Title, newTime)
+func (gd *GDrive) UpdateModificationTime(f File, newTime time.Time) error {
+	gd.debug("updating modification time of %s to %v", f.Path, newTime)
 
-	currentTime, err := GetModificationTime(f)
+	currentTime, err := f.ModTime()
 	if err != nil {
 		return err
 	}
@@ -1318,9 +1366,9 @@ func (gd *GDrive) UpdateModificationTime(f *drive.File, newTime time.Time) error
 
 	for try := 0; ; try++ {
 		fp := &drive.File{ModifiedDate: newTime.UTC().Format(timeFormat)}
-		_, err := gd.svc.Files.Patch(f.Id, fp).SetModifiedDate(true).Do()
+		_, err := gd.svc.Files.Patch(f.driveFile.Id, fp).SetModifiedDate(true).Do()
 		if err == nil {
-			gd.debug("success: updated modification time on %s", f.Title)
+			gd.debug("success: updated modification time on %s", f.Path)
 			return nil
 		} else if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
 			return err
@@ -1355,36 +1403,46 @@ func (gd *GDrive) deleteIncompleteDriveFiles(title string, parentId string) {
 	}
 }
 
-// InsertNewFile creates an actual file in Google Drive with the given
+func convertProplist(p []Property) []*drive.Property {
+	var pl []*drive.Property
+	for _, prop := range p {
+		pl = append(pl, &drive.Property{Key: prop.Key, Value: prop.Value})
+	}
+	return pl
+}
+
+// CreateFile creates an actual file in Google Drive with the given
 // filename.  The new file is in the folder given by represented by the
 // 'parent' parameter, is initialized to have the given modification time
-// and the provided Google Drive file properties.  The returned *drive.File
-// value represents the file in Drive.
-func (gd *GDrive) InsertNewFile(filename string, parent *drive.File,
-	modTime time.Time, proplist []*drive.Property) (*drive.File, error) {
-	pr := &drive.ParentReference{Id: parent.Id}
+// and the provided Google Drive file properties.  The returned File value
+// represents the file in Drive.
+func (gd *GDrive) CreateFile(name string, parent File,
+	modTime time.Time, proplist []Property) (File, error) {
+	pr := &drive.ParentReference{Id: parent.driveFile.Id}
 	f := &drive.File{
-		Title:        filepath.Base(filename),
+		Title:        name,
 		MimeType:     "application/octet-stream",
 		Parents:      []*drive.ParentReference{pr},
 		ModifiedDate: modTime.UTC().Format(timeFormat),
-		Properties:   proplist,
+		Properties:   convertProplist(proplist),
 	}
-	return gd.insertFile(f)
+	f, err := gd.insertFile(f)
+	return File{Path: filepath.Join(parent.Path, name), driveFile: f}, err
 }
 
 // InsertNewFolder creates a new folder in Google Drive with given name.
-func (gd *GDrive) InsertNewFolder(filename string, parent *drive.File,
-	modTime time.Time, proplist []*drive.Property) (*drive.File, error) {
-	pr := &drive.ParentReference{Id: parent.Id}
+func (gd *GDrive) CreateFolder(name string, parent File,
+	modTime time.Time, proplist []Property) (File, error) {
+	pr := &drive.ParentReference{Id: parent.driveFile.Id}
 	f := &drive.File{
-		Title:        filename,
+		Title:        name,
 		MimeType:     "application/vnd.google-apps.folder",
 		ModifiedDate: modTime.UTC().Format(timeFormat),
 		Parents:      []*drive.ParentReference{pr},
-		Properties:   proplist,
+		Properties:   convertProplist(proplist),
 	}
-	return gd.insertFile(f)
+	f, err := gd.insertFile(f)
+	return File{Path: filepath.Join(parent.Path, name), driveFile: f}, err
 }
 
 func (gd *GDrive) insertFile(f *drive.File) (*drive.File, error) {
@@ -1405,37 +1463,28 @@ func (gd *GDrive) insertFile(f *drive.File) (*drive.File, error) {
 	}
 }
 
-// GetModificationTime returns the modification time of the given Google
-// Drive file as a time.Time.
-func GetModificationTime(f *drive.File) (time.Time, error) {
-	if f.ModifiedDate != "" {
-		return time.Parse(time.RFC3339Nano, f.ModifiedDate)
-	}
-	return time.Unix(0, 0), nil
-}
-
 // DeleteFile deletes the given file from Google Drive; note that delection
 // is permanent and un-reversable!  (Consider TrashFile instead.)
-func (gd *GDrive) DeleteFile(f *drive.File) error {
+func (gd *GDrive) DeleteFile(f File) error {
 	for try := 0; ; try++ {
-		err := gd.svc.Files.Delete(f.Id).Do()
+		err := gd.svc.Files.Delete(f.driveFile.Id).Do()
 		if err == nil {
 			return nil
 		} else if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
-			return fmt.Errorf("unable to delete file %s: %v", f.Title, err)
+			return fmt.Errorf("unable to delete file %s: %v", f.Path, err)
 		}
 	}
 }
 
 // TrashFile moves the given Google Drive file to the trash; it is not
 // immediately deleted permanently.
-func (gd *GDrive) TrashFile(f *drive.File) error {
+func (gd *GDrive) TrashFile(f File) error {
 	for try := 0; ; try++ {
-		_, err := gd.svc.Files.Trash(f.Id).Do()
+		_, err := gd.svc.Files.Trash(f.driveFile.Id).Do()
 		if err == nil {
 			return nil
 		} else if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
-			return fmt.Errorf("unable to trash file %s: %v", f.Title, err)
+			return fmt.Errorf("unable to trash file %s: %v", f.Path, err)
 		}
 	}
 }

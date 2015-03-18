@@ -22,15 +22,14 @@ package main
 import (
 	"fmt"
 	"github.com/google/skicka/gdrive"
-	"google.golang.org/api/drive/v2"
 	"os"
 	"path/filepath"
 	"time"
 )
 
-func getPermissionsAsString(driveFile *drive.File) (string, error) {
+func getPermissionsAsString(driveFile gdrive.File) (string, error) {
 	var str string
-	if gdrive.IsFolder(driveFile) {
+	if driveFile.IsFolder() {
 		str = "d"
 	} else {
 		str = "-"
@@ -112,31 +111,29 @@ func ls(args []string) int {
 			if !recursive {
 				printFilename = filepath.Base(printFilename)
 			}
-			if gdrive.IsFolder(f.File) {
+			if f.IsFolder() {
 				printFilename += string(os.PathSeparator)
 			}
 			if long || longlong {
-				synctime, _ := gdrive.GetModificationTime(f.File)
-				permString, _ := getPermissionsAsString(f.File)
+				synctime, _ := f.ModTime()
+				permString, _ := getPermissionsAsString(f)
 				if longlong {
-					md5 := f.File.Md5Checksum
+					md5 := f.MD5()
 					if len(md5) != 32 {
 						md5 = "--------------------------------"
 					}
 					fmt.Printf("%s  %s  %s  %s  %s\n", permString,
-						fmtbytes(f.File.FileSize, true), md5,
+						fmtbytes(f.Size(), true), md5,
 						synctime.Format(time.ANSIC), printFilename)
 					if debug {
 						fmt.Printf("\t[ ")
-						for _, prop := range f.File.Properties {
-							fmt.Printf("%s: %s, ", prop.Key,
-								prop.Value)
+						for _, prop := range f.Properties() {
+							fmt.Printf("%s: %s, ", prop.Key, prop.Value)
 						}
-						fmt.Printf("id: %s ]\n", f.File.Id)
+						fmt.Printf("id: %s ]\n", f.Id())
 					}
 				} else {
-					fmt.Printf("%s  %s  %s  %s\n", permString,
-						fmtbytes(f.File.FileSize, true),
+					fmt.Printf("%s  %s  %s  %s\n", permString, fmtbytes(f.Size(), true),
 						synctime.Format(time.ANSIC), printFilename)
 				}
 			} else {

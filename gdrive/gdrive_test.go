@@ -33,12 +33,12 @@ import (
 
 func TestGetSorted(t *testing.T) {
 	f := newFiles()
-	f.Add("aaa", &drive.File{Title: "aaa"})
-	f.Add("c", &drive.File{Title: "c"})
-	f.Add("b", &drive.File{Title: "b"})
-	f.Add("aaa", &drive.File{Title: "aaa"})
-	f.Add("b", &drive.File{Title: "b"})
-	f.Add("z", &drive.File{Title: "z"})
+	f.Add(File{Path: "aaa", driveFile: &drive.File{Title: "aaa"}})
+	f.Add(File{Path: "c", driveFile: &drive.File{Title: "c"}})
+	f.Add(File{Path: "b", driveFile: &drive.File{Title: "b"}})
+	f.Add(File{Path: "aaa", driveFile: &drive.File{Title: "aaa"}})
+	f.Add(File{Path: "b", driveFile: &drive.File{Title: "b"}})
+	f.Add(File{Path: "z", driveFile: &drive.File{Title: "z"}})
 
 	files := f.GetSorted()
 
@@ -46,8 +46,8 @@ func TestGetSorted(t *testing.T) {
 	if len(files) != len(expected) {
 		t.Fatalf("Expected %d sorted files, got %v", len(expected), len(files))
 	}
-	for i, _ := range expected {
-		if files[i].Path != expected[i] || files[i].File.Title != expected[i] {
+	for i := range expected {
+		if files[i].Path != expected[i] || files[i].driveFile.Title != expected[i] {
 			t.Fatalf("Expected \"%s\" for %d'th sorted file, got %v", expected[i],
 				i, files[i])
 		}
@@ -56,31 +56,31 @@ func TestGetSorted(t *testing.T) {
 
 func TestGetSortedUnique(t *testing.T) {
 	f := newFiles()
-	f.Add("aaa", &drive.File{Title: "aaa"})
-	f.Add("c", &drive.File{Title: "c"})
-	f.Add("b", &drive.File{Title: "b"})
-	f.Add("aaa", &drive.File{Title: "aaa"})
-	f.Add("b", &drive.File{Title: "b"})
-	f.Add("z", &drive.File{Title: "z"})
+	f.Add(File{Path: "aaa", driveFile: &drive.File{Title: "aaa"}})
+	f.Add(File{Path: "c", driveFile: &drive.File{Title: "c"}})
+	f.Add(File{Path: "b", driveFile: &drive.File{Title: "b"}})
+	f.Add(File{Path: "aaa", driveFile: &drive.File{Title: "aaa"}})
+	f.Add(File{Path: "b", driveFile: &drive.File{Title: "b"}})
+	f.Add(File{Path: "z", driveFile: &drive.File{Title: "z"}})
 
 	files, dupes := f.GetSortedUnique()
 	if len(files) != 2 {
 		t.Fatalf("Expected 2 unique files, got %v: %v", len(files), files)
 	}
-	if files[0].Path != "c" || files[0].File.Title != "c" {
+	if files[0].Path != "c" || files[0].driveFile.Title != "c" {
 		t.Fatalf("Expected \"c\" for first sorted file, got %v", files[0])
 	}
-	if files[1].Path != "z" || files[1].File.Title != "z" {
+	if files[1].Path != "z" || files[1].driveFile.Title != "z" {
 		t.Fatalf("Expected \"c\" for first sorted file, got %v", files[1])
 	}
 
 	if len(dupes) != 2 {
 		t.Fatalf("Expected 2 duplicated files, got %v", len(dupes))
 	}
-	if dupes[0] != "aaa" {
+	if dupes[0].Path != "aaa" {
 		t.Fatalf("Expected \"aaa\" for first dupe, got %s", dupes[0])
 	}
-	if dupes[1] != "b" {
+	if dupes[1].Path != "b" {
 		t.Fatalf("Expected \"b\" for second dupe, got %s", dupes[1])
 	}
 

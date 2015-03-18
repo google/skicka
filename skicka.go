@@ -32,7 +32,6 @@ import (
 	"flag"
 	"fmt"
 	"github.com/google/skicka/gdrive"
-	"google.golang.org/api/drive/v2"
 	"io"
 	"io/ioutil"
 	"log"
@@ -471,8 +470,8 @@ func decryptEncryptionKey() []byte {
 // We store the initialization vector as a hex-encoded property in the
 // file so that we don't need to download the file's contents to find the
 // IV.
-func getInitializationVector(driveFile *drive.File) ([]byte, error) {
-	ivhex, err := gdrive.GetProperty(driveFile, "IV")
+func getInitializationVector(driveFile gdrive.File) ([]byte, error) {
+	ivhex, err := driveFile.GetProperty("IV")
 	if err != nil {
 		return nil, err
 	}
@@ -486,8 +485,8 @@ func getInitializationVector(driveFile *drive.File) ([]byte, error) {
 	return iv, nil
 }
 
-func getPermissions(driveFile *drive.File) (os.FileMode, error) {
-	permStr, err := gdrive.GetProperty(driveFile, "Permissions")
+func getPermissions(driveFile gdrive.File) (os.FileMode, error) {
+	permStr, err := driveFile.GetProperty("Permissions")
 	if err != nil {
 		return 0, err
 	}

@@ -93,7 +93,7 @@ func checkRmPossible(path string, recursive bool) error {
 	driveFile, err := gd.GetFile(path)
 	if err != nil {
 		return err
-	} else if !recursive && gdrive.IsFolder(driveFile) {
+	} else if !recursive && driveFile.IsFolder() {
 		return fmt.Errorf("is a folder")
 	}
 	return nil

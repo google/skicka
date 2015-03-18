@@ -21,7 +21,6 @@ package main
 
 import (
 	"fmt"
-	"github.com/google/skicka/gdrive"
 	"io"
 	"os"
 	"path/filepath"
@@ -44,7 +43,7 @@ func cat(args []string) int {
 			errs++
 			continue
 		}
-		if gdrive.IsFolder(file) {
+		if file.IsFolder() {
 			fmt.Fprintf(os.Stderr, "skicka: %s: is a directory\n", fn)
 			errs++
 			continue

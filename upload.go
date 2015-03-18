@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"github.com/cheggaaa/pb"
 	"github.com/google/skicka/gdrive"
-	"google.golang.org/api/drive/v2"
 	"io"
 	"os"
 	"path/filepath"
@@ -128,14 +127,18 @@ func syncFileUp(localPath string, stat os.FileInfo, drivePath string, encrypt bo
 	}
 
 	baseName := filepath.Base(drivePath)
-	var driveFile *drive.File
+	var driveFile gdrive.File
 
 	if stat.IsDir() {
 		// We only get here if the folder doesn't exist at all on Drive; if
 		// it already exists, we update the metadata earlier and don't go
 		// through this path.
-		driveFile, err = createDriveFolder(baseName, stat.Mode(), stat.ModTime(),
-			parentFolder)
+		var proplist []gdrive.Property
+		proplist = append(proplist, gdrive.Property{Key: "Permissions",
+			Value: fmt.Sprintf("%#o", stat.Mode()&os.ModePerm)})
+		driveFile, err = gd.CreateFolder(baseName, parentFolder, stat.ModTime(),
+			proplist)
+
 		checkFatalError(err, fmt.Sprintf("%s: create folder", drivePath))
 
 		pb.Increment()
@@ -144,7 +147,7 @@ func syncFileUp(localPath string, stat os.FileInfo, drivePath string, encrypt bo
 
 		// Update the representation of the Google Drive that exist to
 		// account for the new folder.
-		files.Add(drivePath, driveFile)
+		files.Add(driveFile)
 	} else {
 		// We're uploading a file.  Create an empty file on Google Drive if
 		// it doesn't already exist. We explicitly set the modification
@@ -153,8 +156,18 @@ func syncFileUp(localPath string, stat os.FileInfo, drivePath string, encrypt bo
 		// about which file is the correct one from having local and Drive
 		// copies with the same time but different contents.
 		if driveFile, err = files.GetOne(drivePath); err == gdrive.ErrNotExist {
-			driveFile, err = createDriveFile(baseName, stat.Mode(), time.Unix(0, 0),
-				encrypt, parentFolder)
+			var proplist []gdrive.Property
+			if encrypt {
+				// Compute a unique IV for the file.
+				iv := getRandomBytes(aes.BlockSize)
+				ivhex := hex.EncodeToString(iv)
+				proplist = append(proplist, gdrive.Property{Key: "IV", Value: ivhex})
+			}
+			proplist = append(proplist, gdrive.Property{Key: "Permissions",
+				Value: fmt.Sprintf("%#o", stat.Mode()&os.ModePerm)})
+			driveFile, err = gd.CreateFile(baseName, parentFolder, time.Unix(0, 0),
+				proplist)
+
 			if err != nil {
 				return err
 			}
@@ -179,7 +192,7 @@ func syncFileUp(localPath string, stat os.FileInfo, drivePath string, encrypt bo
 // uploadFileContents does its best to upload the local file stored at
 // localPath to the given *drive.File on Google Drive.  (It assumes that
 // the *drive.File has already been created.)
-func uploadFileContents(localPath string, driveFile *drive.File, encrypt bool,
+func uploadFileContents(localPath string, driveFile gdrive.File, encrypt bool,
 	pb *pb.ProgressBar) error {
 	var iv []byte
 	var err error
@@ -470,11 +483,11 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 
 	// Error out if there's a mismatch on file-ness and folder-ness between
 	// local and Drive.
-	if stat.IsDir() && !gdrive.IsFolder(driveFile) {
+	if stat.IsDir() && !driveFile.IsFolder() {
 		return false, fmt.Errorf("%s: is directory, but %s on Drive is a regular file",
 			localPath, drivePath)
 	}
-	if !stat.IsDir() && gdrive.IsFolder(driveFile) {
+	if !stat.IsDir() && driveFile.IsFolder() {
 		return false, fmt.Errorf("%s: is regular file, but %s on Drive is a folder",
 			localPath, drivePath)
 	}
@@ -499,7 +512,7 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 	}
 
 	// Compare file sizes.
-	localSize, driveSize := stat.Size(), driveFile.FileSize
+	localSize, driveSize := stat.Size(), driveFile.Size()
 	if encrypt {
 		// We store a copy of the initialization vector at the start of
 		// the file stored in Google Drive; account for this when
@@ -514,7 +527,7 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 	}
 
 	// Compare modification times.
-	driveTime, err := gdrive.GetModificationTime(driveFile)
+	driveTime, err := driveFile.ModTime()
 	if err != nil {
 		return true, err
 	}
@@ -542,7 +555,7 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 	if err != nil {
 		return false, err
 	}
-	if md5contents != driveFile.Md5Checksum {
+	if md5contents != driveFile.MD5() {
 		// The contents of the local file and the remote file differ.
 
 		if timeMatches {
@@ -581,7 +594,7 @@ func compileUploadFileTree(localPath, drivePath string, existingFiles gdrive.Fil
 	// different...
 	if stat, err := os.Stat(localPath); err == nil && stat.IsDir() == false {
 		driveFile, err := gd.GetFile(drivePath)
-		if err == nil && gdrive.IsFolder(driveFile) {
+		if err == nil && driveFile.IsFolder() {
 			// The local path is for a file and the Drive path is for a
 			// folder; update the drive path to end with the base of the
 			// local filename.
@@ -651,16 +664,16 @@ func compileUploadFileTree(localPath, drivePath string, existingFiles gdrive.Fil
 // If we didn't shut down cleanly before, there may be files that
 // don't have the various properties we expect. Check for that now
 // and patch things up as needed.
-func createMissingProperties(f *drive.File, mode os.FileMode, encrypt bool) error {
-	if !gdrive.IsFolder(f) && encrypt {
-		if _, err := gdrive.GetProperty(f, "IV"); err != nil {
-			if f.FileSize == 0 {
+func createMissingProperties(f gdrive.File, mode os.FileMode, encrypt bool) error {
+	if !f.IsFolder() && encrypt {
+		if _, err := f.GetProperty("IV"); err != nil {
+			if f.Size() == 0 {
 				// Compute a unique IV for the file.
 				iv := getRandomBytes(aes.BlockSize)
 				ivhex := hex.EncodeToString(iv)
 
 				debug.Printf("Creating IV property for file %s, "+
-					"which doesn't have one.", f.Title)
+					"which doesn't have one.", f.Path)
 				err := gd.AddProperty("IV", ivhex, f)
 				if err != nil {
 					return err
@@ -680,40 +693,13 @@ func createMissingProperties(f *drive.File, mode os.FileMode, encrypt bool) erro
 			}
 		}
 	}
-	if _, err := gdrive.GetProperty(f, "Permissions"); err != nil {
+	if _, err := f.GetProperty("Permissions"); err != nil {
 		debug.Printf("Creating Permissions property for file %s, "+
-			"which doesn't have one.", f.Title)
+			"which doesn't have one.", f.Path)
 		err := gd.AddProperty("Permissions", fmt.Sprintf("%#o", mode&os.ModePerm), f)
 		if err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// Create a new *drive.File with the given name inside the folder represented
-// by parentFolder.
-func createDriveFile(filename string, mode os.FileMode, modTime time.Time, encrypt bool,
-	parentFolder *drive.File) (*drive.File, error) {
-	var proplist []*drive.Property
-	if encrypt {
-		// Compute a unique IV for the file.
-		iv := getRandomBytes(aes.BlockSize)
-		ivhex := hex.EncodeToString(iv)
-		proplist = append(proplist, &drive.Property{Key: "IV", Value: ivhex})
-	}
-	proplist = append(proplist, &drive.Property{Key: "Permissions",
-		Value: fmt.Sprintf("%#o", mode&os.ModePerm)})
-
-	return gd.InsertNewFile(filename, parentFolder, modTime, proplist)
-}
-
-// Create a *drive.File for the folder with the given title and parent folder.
-func createDriveFolder(title string, mode os.FileMode, modTime time.Time,
-	parentFolder *drive.File) (*drive.File, error) {
-	var proplist []*drive.Property
-	proplist = append(proplist, &drive.Property{Key: "Permissions",
-		Value: fmt.Sprintf("%#o", mode&os.ModePerm)})
-
-	return gd.InsertNewFolder(title, parentFolder, modTime, proplist)
 }

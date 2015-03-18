@@ -79,7 +79,11 @@ func mkdir(args []string) int {
 					// directory in the provided path or if -p was specified.
 					// Otherwise, error time.
 					if index+1 == nDirs || makeIntermediate {
-						parent, err = createDriveFolder(dir, 0755, time.Now(), parent)
+						var proplist []gdrive.Property
+						proplist = append(proplist, gdrive.Property{Key: "Permissions",
+							Value: fmt.Sprintf("%#o", 0755&os.ModePerm)})
+						parent, err = gd.CreateFolder(dir, parent, time.Now(), proplist)
+
 						debug.Printf("Creating folder %s", pathSoFar)
 						if err != nil {
 							fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", pathSoFar, err)
@@ -104,7 +108,7 @@ func mkdir(args []string) int {
 					fmt.Fprintf(os.Stderr, "skicka: %s: already exists\n", pathSoFar)
 					errs++
 					break
-				} else if !gdrive.IsFolder(file) {
+				} else if !file.IsFolder() {
 					fmt.Fprintf(os.Stderr, "skicka: %s: not a folder\n", pathSoFar)
 					errs++
 					break

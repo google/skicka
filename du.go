@@ -21,7 +21,6 @@ package main
 
 import (
 	"fmt"
-	"github.com/google/skicka/gdrive"
 	"os"
 	"path/filepath"
 	"sort"
@@ -58,12 +57,12 @@ func du(args []string) int {
 		totalSize := int64(0)
 
 		for _, f := range sorted {
-			if gdrive.IsFolder(f.File) {
+			if f.IsFolder() {
 				dirNames = append(dirNames, f.Path)
 			} else {
 				// Accumulate the file's contribution to the directory it's
 				// in as well as all of the directories above it.
-				sz := f.File.FileSize
+				sz := f.Size()
 				totalSize += sz
 				dirName := filepath.Clean(filepath.Dir(f.Path))
 				for ; dirName != string(os.PathSeparator) && dirName != "."; dirName = filepath.Dir(dirName) {
