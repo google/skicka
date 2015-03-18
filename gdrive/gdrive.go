@@ -72,6 +72,11 @@ func (f File) ModTime() (time.Time, error) {
 	return time.Unix(0, 0), nil
 }
 
+// MimeType returns the stored MIME type of the Drive file.
+func (f File) MimeType() string {
+	return f.driveFile.MimeType
+}
+
 // Id returns the unique identifier associated with the file on Google
 // Drive.
 func (f File) Id() string {
@@ -87,6 +92,10 @@ func (f File) MD5() string {
 // folder.
 func (f File) IsFolder() bool {
 	return f.driveFile.MimeType == "application/vnd.google-apps.folder"
+}
+
+func (f File) IsGoogleAppsFile() bool {
+	return strings.HasPrefix(f.driveFile.MimeType, "application/vnd.google-apps.")
 }
 
 // Property represents a user-specified property associated with a Drive
