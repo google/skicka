@@ -75,7 +75,7 @@ func upload(args []string) int {
 	recursive := true
 	includeBase := true
 	mustExist := false
-	fmt.Fprintf(os.Stderr, "skicka: Getting list of files to upload... ")
+	fmt.Fprintf(os.Stderr, "skicka: Getting list of files currently on Google Drive... ")
 	driveFiles, err := gd.GetFilesUnderPath(drivePath, recursive, includeBase,
 		mustExist)
 	fmt.Fprintf(os.Stderr, "Done.\n")
@@ -603,6 +603,7 @@ func compileUploadFileTree(localPath, drivePath string, existingFiles gdrive.Fil
 		return fileMappings, nUploadErrors
 	}
 
+	fmt.Fprintf(os.Stderr, "skicka: Getting list of local files... ")
 	err := filepath.Walk(localPath,
 		func(path string, stat os.FileInfo, patherr error) error {
 			path = filepath.Clean(path)
@@ -637,6 +638,7 @@ func compileUploadFileTree(localPath, drivePath string, existingFiles gdrive.Fil
 			// needs to be uploaded.
 			return nil
 		})
+	fmt.Fprintf(os.Stderr, "Done.\n")
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "skicka: %s", err)
