@@ -799,20 +799,21 @@ func (f Files) GetSorted() []File {
 
 // GetSortedUnique sorts all of the files by path name and then returns two
 // arrays of File structures.  The first includes all unique files--ones
-// that only have a single file with that pthname on Drive.  The second has
+// that only have a single file with that pathname on Drive.  The second has
 // all files where there are two or more files with that name on Drive.
-func (f Files) GetSortedUnique() ([]File, []File) {
+func (f Files) GetSortedUnique() ([]File, map[string][]File) {
 	allFiles := f.GetSorted()
 
-	var dupes, files []File
+	var files []File
+	dupes := make(map[string][]File)
 	for i, f := range allFiles {
 		// Non-duplicated files are different than their neighbors on both
 		// sides (if present).
 		if (i == 0 || f.Path != allFiles[i-1].Path) &&
 			(i == len(allFiles)-1 || f.Path != allFiles[i+1].Path) {
 			files = append(files, f)
-		} else if dupes == nil || dupes[len(dupes)-1].Path != f.Path {
-			dupes = append(dupes, f)
+		} else {
+			dupes[f.Path] = append(dupes[f.Path], f)
 		}
 	}
 
