@@ -33,7 +33,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -334,11 +333,6 @@ func downloadFile(f gdrive.File, filePath string, progressBar *pb.ProgressBar) e
 // Create all of the directories on the local filesystem for the folders in
 // the given array of gdrive.Files.
 func createLocalDirectories(localPathMap map[string]string, files []gdrive.File) error {
-	// Override the currently set umask value for this function; we'd like
-	// to set permissions precisely as they are on Drive.
-	oldmask := syscall.Umask(0)
-	defer syscall.Umask(oldmask)
-
 	for _, f := range files {
 		if !gdrive.IsFolder(f.File) {
 			continue
@@ -360,23 +354,28 @@ func createLocalDirectories(localPathMap map[string]string, files []gdrive.File)
 		dirPath := localPathMap[f.File.Id]
 		if stat, err := os.Stat(dirPath); err == nil {
 			// A file or directory already exists at dirPath.
-			if stat.IsDir() {
-				// Update its permissions to match those of the file on Drive.
-				err := os.Chmod(dirPath, permissions)
-				if err != nil {
-					return err
-				}
-			} else {
+			if !stat.IsDir() {
 				return fmt.Errorf("%s: is a regular file but %s on Google Drive is a folder",
 					dirPath, f.Path)
 			}
 		} else {
+			// Create a local directory.
 			verbose.Printf("Creating directory %s for %s with permissions %#o",
 				dirPath, f.Path, permissions)
 			err = os.Mkdir(dirPath, permissions)
 			if err != nil {
 				return err
 			}
+		}
+
+		// In either case, update the directory's permissions to match
+		// those of the file on Drive.  This is important both in case the
+		// permissions changed on Drive as well as for the case of creating
+		// a new directory: on Unix, the umask value affects the actual
+		// permissions, while we'd really like to exactly match them.
+		err = os.Chmod(dirPath, permissions)
+		if err != nil {
+			return err
 		}
 	}
 	return nil
