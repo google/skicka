@@ -650,6 +650,12 @@ Commands and their options are:
   du         Print the space used by the Google Drive folder and its children.
              Arguments: [drive_path ...]
 
+  fsck-experimental [EXPERIMENTAL] Use at your own risk.
+             Perform a number of consistency checks on files stored in Google
+             Drive, including verifying metadata and removing duplicate files
+             with the same name.
+             Arguments: [--trash-duplicates] [drive_path]
+
   help       Print this help text.
 
   genkey     Generate a new key for encrypting files.
@@ -701,7 +707,7 @@ General options valid for all commands:
 
 func shortUsage() {
 	fmt.Fprintf(os.Stderr, "usage: skicka "+
-		"[cat,download,du,genkey,help,init,ls,mkdir,rm,upload] ...\n")
+		"[cat,download,du,fsck-experimental,genkey,help,init,ls,mkdir,rm,upload] ...\n")
 	fmt.Fprintf(os.Stderr, "Run \"skicka help\" for more detailed help text.\n")
 }
 
@@ -775,20 +781,22 @@ func main() {
 
 	errs := 0
 	switch cmd {
-	case "du":
-		errs = du(args)
 	case "cat":
 		errs = cat(args)
+	case "download":
+		errs = download(args)
+	case "du":
+		errs = du(args)
+	case "fsck-experimental":
+		errs = fsck(args)
 	case "ls":
 		errs = ls(args)
 	case "mkdir":
 		errs = mkdir(args)
-	case "upload":
-		errs = upload(args)
-	case "download":
-		errs = download(args)
 	case "rm":
 		errs = rm(args)
+	case "upload":
+		errs = upload(args)
 	default:
 		shortUsage()
 		errs = 1
