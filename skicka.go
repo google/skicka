@@ -470,7 +470,7 @@ func decryptEncryptionKey() []byte {
 // We store the initialization vector as a hex-encoded property in the
 // file so that we don't need to download the file's contents to find the
 // IV.
-func getInitializationVector(driveFile gdrive.File) ([]byte, error) {
+func getInitializationVector(driveFile *gdrive.File) ([]byte, error) {
 	ivhex, err := driveFile.GetProperty("IV")
 	if err != nil {
 		return nil, err
@@ -485,7 +485,7 @@ func getInitializationVector(driveFile gdrive.File) ([]byte, error) {
 	return iv, nil
 }
 
-func getPermissions(driveFile gdrive.File) (os.FileMode, error) {
+func getPermissions(driveFile *gdrive.File) (os.FileMode, error) {
 	permStr, err := driveFile.GetProperty("Permissions")
 	if err != nil {
 		return 0, err
@@ -665,11 +665,13 @@ Commands and their options are:
              configuration file for details.)
 
   ls         List the files and directories in the given Google Drive folder.
-             Arguments: [-l, -ll, -r] [drive_path ...],
+             Arguments: [-d, -l, -ll, -r] [drive_path ...],
              where -l and -ll specify long (including sizes and update times)
              and really long output (also including MD5 checksums), respectively.
              The -r argument causes ls to recursively list all files in the
-             hierarchy rooted at the base directory.
+             hierarchy rooted at the base directory, and -d causes directories
+             specified on the command line to be listed as files (i.e., their
+             contents aren't listed.)
 
   mkdir      Create a new directory (folder) at the given Google Drive path.
              Arguments: [-p] drive_path ...,
@@ -706,9 +708,21 @@ General options valid for all commands:
 }
 
 func shortUsage() {
-	fmt.Fprintf(os.Stderr, "usage: skicka "+
-		"[cat,download,du,fsck-experimental,genkey,help,init,ls,mkdir,rm,upload] ...\n")
-	fmt.Fprintf(os.Stderr, "Run \"skicka help\" for more detailed help text.\n")
+	fmt.Fprintf(os.Stderr, `usage: skicka [skicka options] <command> [command options]
+Supported commands are:
+  cat       Print the contents of the given file
+  download  Download a file or folder hierarchy from Drive to the local disk
+  du        Report disk usage for a folder hierarchy on Drive
+  fsck-experimental
+  genkey    Generate a new encryption key
+  init      Create an initial skicka configuration file
+  ls        List the contents of a folder on Google Drive
+  mkdir     Create a new folder or folder hierarchy on Drive
+  rm        Remove a file or folder on Google Drive
+  upload    Upload a local file or directory hierarchy to Drive
+
+'skicka help' prints more detailed documentation.
+`)
 }
 
 func userHomeDir() string {
@@ -724,10 +738,12 @@ func userHomeDir() string {
 
 func main() {
 	home := userHomeDir()
-	cachefile := flag.String("tokencache", home+"/.skicka.tokencache.json",
+	tokenCacheFilename := flag.String("tokencache", home+"/.skicka.tokencache.json",
 		"OAuth2 token cache file")
 	configFilename := flag.String("config", home+"/.skicka.config",
 		"Configuration file")
+	metadataCacheFilename := flag.String("metadata-cache-file", home+"/.skicka.metadata.cache",
+		"Filename for local cache of Google Drive file metadata")
 	vb := flag.Bool("verbose", false, "Enable verbose output")
 	dbg := flag.Bool("debug", false, "Enable debugging output")
 	dumpHTTP := flag.Bool("dump-http", false, "Dump http traffic")
@@ -768,10 +784,19 @@ func main() {
 		dpf = debugNoPrint
 	}
 
+	// Check this before creating the GDrive object so that we don't spend
+	// a lot of time updating the cache if we were just going to print the
+	// usage message.
+	if cmd != "cat" && cmd != "download" && cmd != "du" && cmd != "fsck-experimental" &&
+		cmd != "ls" && cmd != "mkdir" && cmd != "rm" && cmd != "upload" {
+		shortUsage()
+		os.Exit(1)
+	}
+
 	var err error
 	gd, err = gdrive.New(config.Google.ClientId, config.Google.ClientSecret,
-		config.Google.ApiKey, *cachefile, config.Upload.Bytes_per_second_limit,
-		config.Download.Bytes_per_second_limit, dpf, *dumpHTTP)
+		config.Google.ApiKey, *tokenCacheFilename, config.Upload.Bytes_per_second_limit,
+		config.Download.Bytes_per_second_limit, dpf, *dumpHTTP, *metadataCacheFilename)
 	if err != nil {
 		printErrorAndExit(fmt.Errorf("error creating Google Drive "+
 			"client: %v", err))
@@ -797,9 +822,10 @@ func main() {
 		errs = rm(args)
 	case "upload":
 		errs = upload(args)
+		gd.UpdateMetadataCache(*metadataCacheFilename)
 	default:
-		shortUsage()
 		errs = 1
 	}
+
 	os.Exit(errs)
 }

@@ -64,10 +64,8 @@ mistake, it should be possible to salvage the file from the trash.
 `)
 	}
 
-	recursive := true
 	includeBase := true
-	mustExist := true
-	files, err := gd.GetFilesUnderPath(path, recursive, includeBase, mustExist)
+	files, err := gd.GetFilesUnderFolder(path, includeBase)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", path, err)
 		return 1
@@ -85,7 +83,7 @@ mistake, it should be possible to salvage the file from the trash.
 	return errs
 }
 
-func checkFile(f gdrive.File) int {
+func checkFile(f *gdrive.File) int {
 	hasSuffix := strings.HasSuffix(f.Path, encryptionSuffix)
 	_, err := f.GetProperty("IV")
 	hasIV := err == nil
@@ -102,7 +100,7 @@ func checkFile(f gdrive.File) int {
 	return 0
 }
 
-func cleanupDupes(files []gdrive.File, actuallyTrash bool) int {
+func cleanupDupes(files []*gdrive.File, actuallyTrash bool) int {
 	if len(files) < 2 {
 		panic(fmt.Sprintf("less than two files in dupes?: %d %v",
 			len(files), files))
@@ -114,10 +112,10 @@ func cleanupDupes(files []gdrive.File, actuallyTrash bool) int {
 	// come up with size equals zero and empty md5 strings.
 	for _, f := range files {
 		if f.IsGoogleAppsFile() {
-			if f.Size() > 0 || f.MD5() != "" {
+			if f.FileSize > 0 || f.Md5 != "" {
 				fmt.Fprintf(os.Stderr, "skicka: %s: surprise! Google Apps file "+
 					"with mimetype %s has length %d and MD5 %s.\n", f.Path,
-					f.MimeType(), f.Size(), f.MD5())
+					f.MimeType, f.FileSize, f.Md5)
 				return 0
 			}
 			fmt.Fprintf(os.Stderr, "skicka: %s: one or more are Google Apps files. "+
@@ -134,15 +132,15 @@ func cleanupDupes(files []gdrive.File, actuallyTrash bool) int {
 		// If this file is empty, then we can discard it: the survivor is
 		// either also empty or actually has contents, so this file is
 		// definitely less useful.
-		if f.Size() == 0 {
+		if f.FileSize == 0 {
 			err = deleteDupe(f, actuallyTrash)
 		} else {
 			// Not empty.
-			if f.Size() == survivor.Size() && f.MD5() == survivor.MD5() {
+			if f.FileSize == survivor.FileSize && f.Md5 == survivor.Md5 {
 				// Does it exactly match the survivor?  If so, we can
 				// delete it.
 				err = deleteDupe(f, actuallyTrash)
-			} else if survivor.Size() == 0 {
+			} else if survivor.FileSize == 0 {
 				// The survivor is empty but this file isn't.  Delete the
 				// previous survivor and keep this one as the new survivor.
 				err = deleteDupe(survivor, actuallyTrash)
@@ -151,7 +149,7 @@ func cleanupDupes(files []gdrive.File, actuallyTrash bool) int {
 				// Both this file and the survivor are non-empty, but they
 				// differ, so don't do anything.
 				fmt.Fprintf(os.Stderr, "skicka: %s: at least two instances of this file "+
-					"are non-empty but have different contents. Leaving them alone.", f.Path)
+					"are non-empty but have different contents. Leaving them alone.\n", f.Path)
 				return 0
 			}
 		}
@@ -163,15 +161,15 @@ func cleanupDupes(files []gdrive.File, actuallyTrash bool) int {
 	return errs
 }
 
-func deleteDupe(f gdrive.File, actuallyTrash bool) error {
+func deleteDupe(f *gdrive.File, actuallyTrash bool) error {
 	if !actuallyTrash {
 		fmt.Fprintf(os.Stderr, "skicka: %s[%s]: would trash (size %d md5 %s)\n",
-			f.Path, f.Id(), f.Size(), f.MD5())
+			f.Path, f.Id, f.FileSize, f.Md5)
 		return nil
 	}
 
 	fmt.Fprintf(os.Stderr, "skicka: %s[%s]: trashing (size %d md5 %s)\n",
-		f.Path, f.Id(), f.Size(), f.MD5())
+		f.Path, f.Id, f.FileSize, f.Md5)
 	// Store its original path in a property, just in case of disaster and
 	// it's necessary to write a little restore tool.
 	err := gd.AddProperty("Path", f.Path, f)

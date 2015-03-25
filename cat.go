@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 )
 
 func cat(args []string) int {
@@ -35,8 +34,6 @@ func cat(args []string) int {
 
 	errs := 0
 	for _, fn := range args {
-		fn := filepath.Clean(fn)
-
 		file, err := gd.GetFile(fn)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", fn, err)

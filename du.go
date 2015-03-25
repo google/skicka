@@ -36,11 +36,8 @@ func du(args []string) int {
 		drivePath = filepath.Clean(drivePath)
 
 		// Get all of the files under drivePath from Google Drive.
-		recursive := true
 		includeBase := false
-		mustExist := true
-		files, err := gd.GetFilesUnderPath(drivePath, recursive, includeBase,
-			mustExist)
+		files, err := gd.GetFilesUnderFolder(drivePath, includeBase)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", drivePath, err)
 			errs++
@@ -62,7 +59,7 @@ func du(args []string) int {
 			} else {
 				// Accumulate the file's contribution to the directory it's
 				// in as well as all of the directories above it.
-				sz := f.Size()
+				sz := f.FileSize
 				totalSize += sz
 				dirName := filepath.Clean(filepath.Dir(f.Path))
 				for ; dirName != string(os.PathSeparator) && dirName != "."; dirName = filepath.Dir(dirName) {

@@ -27,7 +27,7 @@ import (
 	"time"
 )
 
-func getPermissionsAsString(driveFile gdrive.File) (string, error) {
+func getPermissionsAsString(driveFile *gdrive.File) (string, error) {
 	var str string
 	if driveFile.IsFolder() {
 		str = "d"
@@ -58,6 +58,7 @@ func ls(args []string) int {
 	long := false
 	longlong := false
 	recursive := false
+	dirAsFile := false
 	var argFilenames []string
 	for _, arg := range args {
 		if len(argFilenames) > 0 {
@@ -71,8 +72,10 @@ func ls(args []string) int {
 			longlong = true
 		} else if arg == "-r" {
 			recursive = true
-		} else if arg[0] == '-' {
-			fmt.Printf("Usage: skicka ls [-l,-ll,-r] [drive_path ...]\n")
+		} else if arg == "-d" {
+			dirAsFile = true
+		} else if len(arg) > 0 && arg[0] == '-' {
+			fmt.Printf("Usage: skicka ls [-d,-l,-ll,-r] [drive_path ...]\n")
 			fmt.Printf("Run \"skicka help\" for more detailed help text.\n")
 			return 1
 		} else {
@@ -93,57 +96,88 @@ func ls(args []string) int {
 		}
 
 		// Get the files for the current path from Google Drive.
-		includeBase := false
-		mustExist := true
-		files, err := gd.GetFilesUnderPath(drivePath, recursive, includeBase,
-			mustExist)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", drivePath, err)
+		files := gd.GetFiles(drivePath)
+		if len(files) == 0 {
+			fmt.Fprintf(os.Stderr, "skicka: %s: file not found\n", drivePath)
 			errs++
 			continue
 		}
 
-		// Sort the individual filenames returned.
-		sorted := files.GetSorted()
-
-		for _, f := range sorted {
-			printFilename := f.Path
-			if !recursive {
-				printFilename = filepath.Base(printFilename)
+		if !files[0].IsFolder() || dirAsFile {
+			// If the user specified a full path to a regular file on the
+			// command line or gave the -d option, then don't try to list
+			// the directory contents.
+			for _, f := range files {
+				lsFile(f, recursive, long, longlong)
 			}
-			if f.IsFolder() {
-				printFilename += string(os.PathSeparator)
-			}
-			if long || longlong {
-				synctime, _ := f.ModTime()
-				permString, _ := getPermissionsAsString(f)
-				if longlong {
-					md5 := f.MD5()
-					if len(md5) != 32 {
-						md5 = "--------------------------------"
-					}
-					fmt.Printf("%s  %s  %s  %s  %s\n", permString,
-						fmtbytes(f.Size(), true), md5,
-						synctime.Format(time.ANSIC), printFilename)
-					if debug {
-						fmt.Printf("\t[ ")
-						for _, prop := range f.Properties() {
-							fmt.Printf("%s: %s, ", prop.Key, prop.Value)
-						}
-						fmt.Printf("id: %s ]\n", f.Id())
-					}
-				} else {
-					fmt.Printf("%s  %s  %s  %s\n", permString, fmtbytes(f.Size(), true),
-						synctime.Format(time.ANSIC), printFilename)
-				}
+		} else {
+			// Otherwise get either the files in the enclosing folder, or
+			// all files under the folder, depending on whether the
+			// recursive option was specified.
+			includeBase := false
+			var files gdrive.Files
+			var err error
+			if recursive {
+				files, err = gd.GetFilesUnderFolder(drivePath, includeBase)
 			} else {
-				fmt.Printf("%s\n", printFilename)
+				files, err = gd.GetFilesInFolder(drivePath)
 			}
-		}
 
-		if len(argFilenames) > 1 && index < len(argFilenames)-1 {
-			fmt.Printf("\n")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", drivePath, err)
+				errs++
+				continue
+			}
+
+			// Sort the individual filenames returned.
+			sorted := files.GetSorted()
+
+			for _, f := range sorted {
+				lsFile(f, recursive, long, longlong)
+			}
+
+			if len(argFilenames) > 1 && index < len(argFilenames)-1 {
+				fmt.Printf("\n")
+			}
 		}
 	}
 	return errs
+}
+
+// Produce listing output to stdout for a single file.
+func lsFile(f *gdrive.File, recursive, long, longlong bool) {
+	printFilename := f.Path
+	if !recursive {
+		printFilename = filepath.Base(printFilename)
+	}
+	if f.IsFolder() {
+		printFilename += string(os.PathSeparator)
+	}
+
+	if !long && !longlong {
+		fmt.Printf("%s\n", printFilename)
+		return
+	}
+
+	synctime := f.ModTime
+	permString, _ := getPermissionsAsString(f)
+	if longlong {
+		md5 := f.Md5
+		if len(md5) != 32 {
+			md5 = "--------------------------------"
+		}
+		fmt.Printf("%s  %s  %s  %s  %s\n", permString,
+			fmtbytes(f.FileSize, true), md5, synctime.Format(time.ANSIC),
+			printFilename)
+		if debug {
+			fmt.Printf("\t[ ")
+			for _, prop := range f.Properties {
+				fmt.Printf("%s: %s, ", prop.Key, prop.Value)
+			}
+			fmt.Printf("id: %s ]\n", f.Id)
+		}
+	} else {
+		fmt.Printf("%s  %s  %s  %s\n", permString, fmtbytes(f.FileSize, true),
+			synctime.Format(time.ANSIC), printFilename)
+	}
 }
