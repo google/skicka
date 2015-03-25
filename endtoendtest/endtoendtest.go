@@ -19,7 +19,6 @@
 
 /*
 more things that need testing:
-- single file uploads/downloads
 - downloading Drive files/folders that weren't originally created by skicka
 - sometimes randomly interrupt the upload?
 */
@@ -36,6 +35,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -52,6 +53,204 @@ func main() {
 	log.Printf("Seed = %d", seed)
 	rand.Seed(seed)
 
+	prepDrive()
+	miscTest()
+
+	prepDrive()
+	uploadDownloadTest()
+}
+
+const driveDir = "/skicka_test"
+
+var nDirs = 1
+
+func prepDrive() {
+	log.Printf("Removing %s on Drive", driveDir)
+	_ = runCommand("skicka rm -r ", driveDir)
+}
+
+func randBool() bool {
+	return rand.Float32() < .25
+}
+
+func expSize() int64 {
+	logSize := (rand.Int31() % 24) - 1
+	s := int64(0)
+	if logSize >= 0 {
+		s = 1 << uint(logSize)
+		s += rand.Int63() % s
+	}
+	return s
+}
+
+func modPath(dir string) string {
+	if randBool() && dir[0] == os.PathSeparator {
+		if randBool() {
+			dir = dir[1:]
+		} else {
+			dir = "." + dir
+		}
+	}
+	return dir
+}
+
+func getCommand(c string, varargs ...string) *exec.Cmd {
+	args := strings.Fields(c)
+	cmd := args[0]
+	args = args[1:]
+	for _, va := range varargs {
+		args = append(args, va)
+	}
+
+	return exec.Command(cmd, args...)
+}
+
+func runCommand(c string, args ...string) error {
+	log.Printf("Running %s %v", c, args)
+	cmd := getCommand(c, args...)
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+	return cmd.Run()
+}
+
+func runExpectSuccess(expected string, c string, args ...string) {
+	log.Printf("Running %s %v", c, args)
+	cmd := getCommand(c, args...)
+	cmd.Stderr = os.Stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		log.Fatal(err)
+	}
+
+	output, err := ioutil.ReadAll(stdout)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	checkMatch(expected, string(output))
+
+	if err := cmd.Wait(); err != nil {
+		log.Fatalf("Failed unexpectedly!")
+	}
+}
+
+func runExpectFailure(expected string, c string, args ...string) {
+	log.Printf("Running %s %v", c, args)
+	cmd := getCommand(c, args...)
+	cmd.Stdout = os.Stdout
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		log.Fatal(err)
+	}
+
+	output, err := ioutil.ReadAll(stderr)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	checkMatch(expected, string(output))
+
+	if err := cmd.Wait(); err == nil {
+		log.Fatal("Ran successfully (unexpectedly)!")
+	}
+}
+
+func checkMatch(expected, output string) {
+	lines := strings.Split(output, "\n")
+	for _, l := range lines {
+		match, err := regexp.Match(expected, []byte(l))
+		if err != nil {
+			log.Fatal(err)
+		}
+		if match {
+			return
+		}
+	}
+	log.Fatalf("Didn't find expected output \"%s\" in \"%s\"", expected, output)
+}
+
+///////////////////////////////////////////////////////////////////////////
+
+func miscTest() {
+	// Create the /skicka_test directory and a few sub directories
+	runExpectSuccess("", "skicka mkdir", modPath(driveDir))
+	runExpectSuccess("", "skicka mkdir", modPath(filepath.Join(driveDir, "a")))
+	runExpectFailure("/b: no such directory",
+		"skicka mkdir", modPath(filepath.Join(driveDir, "b", "c")))
+	runExpectSuccess("", "skicka mkdir -p", modPath(filepath.Join(driveDir, "b")))
+	runExpectFailure("NOPE: no such directory",
+		"skicka mkdir ", modPath(filepath.Join(driveDir, "NOPE", "b")))
+
+	// Make sure that du reports that it's empty
+	runExpectSuccess(" 0 B    "+driveDir,
+		"skicka du "+driveDir)
+
+	// cat'ing a directory should fail
+	runExpectFailure("/b: is a directory", "skicka cat",
+		modPath(filepath.Join(driveDir, "b")))
+
+	// ls some stuff in the directory
+	runExpectSuccess("^a/$", "skicka ls", driveDir)
+	runExpectSuccess("^b/$", "skicka ls", driveDir)
+	runExpectSuccess("^drwxr\\-xr\\-x.*a/", "skicka ls -l", driveDir)
+	runExpectSuccess("^drwxr\\-xr\\-x.*b/", "skicka ls -l", driveDir)
+	runExpectSuccess("^drwxr\\-xr\\-x.*skicka_test/a/", "skicka ls -l -r", driveDir)
+
+	// fsck should come up clean
+	runExpectSuccess("", "skicka fsck-experimental "+driveDir)
+
+	runExpectSuccess("", "skicka du /")
+	runExpectSuccess("", "skicka du .")
+
+	// upload a small file
+	f, err := ioutil.TempFile("", "skicka-endtoend")
+	if err != nil {
+		log.Fatalf("%s", err)
+	}
+	_, err = f.Write([]byte("foobar"))
+	if err != nil {
+		log.Fatalf("%s", err)
+	}
+	f.Close()
+	runExpectSuccess("", "skicka upload", f.Name(), filepath.Join(driveDir, "upz.txt"))
+
+	// cat its contents and make sure we get the right stuff back
+	runExpectSuccess("^foobar$", "skicka cat", filepath.Join(driveDir, "upz.txt"))
+
+	f, err = ioutil.TempFile("", "skicka-endtoend")
+	if err != nil {
+		log.Fatalf("%s", err)
+	}
+	f.Close()
+	runExpectSuccess("", "skicka download", filepath.Join(driveDir, "upz.txt"), f.Name())
+	contents, err := ioutil.ReadFile(f.Name())
+	if string(contents) != "foobar" {
+		log.Fatalf("%s: file contents don't match \"foobar\"", f.Name())
+	}
+
+	// some ls tests of the uploaded file
+	runExpectSuccess("^upz.txt$", "skicka ls", filepath.Join(driveDir, "upz.txt"))
+	runExpectSuccess("^\\-rw\\-\\-\\-\\-\\-\\-\\- .*upz.txt$", "skicka ls -l",
+		filepath.Join(driveDir, "upz.txt"))
+
+	// wrap up by removing this and that
+	runExpectFailure(": is a folder", "skicka rm", modPath(driveDir))
+	runExpectSuccess("^$", "skicka rm", filepath.Join(driveDir, "upz.txt"))
+	runExpectFailure(": file not found", "skicka rm", filepath.Join(driveDir, "upz.txt"))
+}
+
+///////////////////////////////////////////////////////////////////////////
+
+var createdFiles = make(map[string]bool)
+
+func uploadDownloadTest() {
 	tmpSrc, err := ioutil.TempDir("", "skicka-test-src")
 	if err != nil {
 		log.Fatalf("%s", err)
@@ -63,10 +262,6 @@ func main() {
 		log.Fatalf("%s", err)
 	}
 	log.Printf("Local dst directory: %s", tmpDst)
-
-	if err := prepDrive(); err != nil {
-		log.Fatalf("%s", err)
-	}
 
 	iters := 20 // TODO: command line arg for this
 
@@ -92,23 +287,6 @@ func main() {
 	}
 }
 
-const driveDir = "/skicka_test"
-
-var nDirs = 1
-
-func prepDrive() error {
-	log.Printf("Removing %s on Drive", driveDir)
-	cmd := exec.Command("skicka", "rm", "-r", driveDir)
-	_ = cmd.Run()
-	return nil
-}
-
-func randBool() bool {
-	return rand.Float32() < .25
-}
-
-var createdFiles = make(map[string]bool)
-
 func name(dir string) string {
 	fodder := []string{"car", "house", "food", "cat", "monkey", "bird", "yellow",
 		"blue", "fast", "sky", "table", "pen", "round", "book", "towel", "hair",
@@ -123,16 +301,6 @@ func name(dir string) string {
 	}
 	createdFiles[s] = true
 	return filepath.Join(dir, s)
-}
-
-func expSize() int64 {
-	logSize := (rand.Int31() % 28) - 1
-	s := int64(0)
-	if logSize >= 0 {
-		s = 1 << uint(logSize)
-		s += rand.Int63() % s
-	}
-	return s
 }
 
 func update(dir string) error {
@@ -256,23 +424,16 @@ func update(dir string) error {
 
 func upload(dir string) error {
 	log.Printf("Starting upload")
-	var cmd *exec.Cmd
 	if encrypt {
-		cmd = exec.Command("skicka", "upload", "-encrypt", dir, driveDir)
+		return runCommand("skicka upload -encrypt", dir, modPath(driveDir))
 	} else {
-		cmd = exec.Command("skicka", "upload", dir, driveDir)
+		return runCommand("skicka upload", dir, modPath(driveDir))
 	}
-	cmd.Stderr = os.Stderr
-	cmd.Stdout = os.Stdout
-	return cmd.Run()
 }
 
 func download(dir string) error {
 	log.Printf("Starting download")
-	cmd := exec.Command("skicka", "download", driveDir, dir)
-	cmd.Stderr = os.Stderr
-	cmd.Stdout = os.Stdout
-	return cmd.Run()
+	return runCommand("skicka download", modPath(driveDir), dir)
 }
 
 func compare(patha, pathb string) error {
