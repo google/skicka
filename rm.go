@@ -68,33 +68,40 @@ func rm(args []string) int {
 			continue
 		}
 
-		f, err := gd.GetFile(path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", path, err)
+		files := gd.GetFiles(path)
+		if len(files) == 0 {
+			fmt.Fprintf(os.Stderr, "skicka: %s: no such file or folder\n", path)
 			errs++
-			continue
 		}
 
-		if skipTrash {
-			err = gd.DeleteFile(f)
-		} else {
-			err = gd.TrashFile(f)
-		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", path, err)
-			errs++
-			continue
+		for _, f := range files {
+			var err error
+			if skipTrash {
+				err = gd.DeleteFile(f)
+			} else {
+				err = gd.TrashFile(f)
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "skicka: %s: %v\n", path, err)
+				errs++
+				continue
+			}
 		}
 	}
 	return errs
 }
 
 func checkRmPossible(path string, recursive bool) error {
-	driveFile, err := gd.GetFile(path)
-	if err != nil {
-		return err
-	} else if !recursive && driveFile.IsFolder() {
-		return fmt.Errorf("is a folder")
+	files := gd.GetFiles(path)
+	if len(files) == 0 {
+		return fmt.Errorf("file not found")
+	}
+	if !recursive {
+		for _, f := range files {
+			if f.IsFolder() {
+				return fmt.Errorf("is a folder")
+			}
+		}
 	}
 	return nil
 }
