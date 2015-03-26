@@ -203,7 +203,7 @@ func uploadFileContents(localPath string, driveFile gdrive.File, encrypt bool,
 		}
 	}
 
-	for ntries := 0; ntries < 5; ntries++ {
+	for ntries := 0; ; ntries++ {
 		contentsReader, length, err :=
 			getFileContentsReaderForUpload(localPath, encrypt, iv)
 		if contentsReader != nil {
@@ -240,7 +240,7 @@ func uploadFileContents(localPath string, driveFile gdrive.File, encrypt bool,
 		// 100% progress...
 		pb.Add64(-countingReader.bytesRead)
 
-		if re, ok := err.(gdrive.RetryHTTPTransmitError); ok {
+		if re, ok := err.(gdrive.RetryHTTPTransmitError); ok && ntries < 5 {
 			debug.Printf("%s: got retry http error--retrying: %s",
 				localPath, re.Error())
 		} else {
@@ -251,7 +251,6 @@ func uploadFileContents(localPath string, driveFile gdrive.File, encrypt bool,
 			return err
 		}
 	}
-	return nil
 }
 
 // Synchronize a local directory hierarchy with Google Drive.
