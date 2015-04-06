@@ -162,13 +162,13 @@ func (lr rateLimitedReader) Close() error {
 ///////////////////////////////////////////////////////////////////////////
 
 // somewhatSeekableReader is an io.Reader that can seek backwards from the
-// current offset up to 'bufSize' bytes. It's useful for chunked file
+// current offset up to len(buf) bytes. It's useful for chunked file
 // uploads, where we may need to rewind a bit after a failed chunk, but
 // definitely don't want to pay the overhead of having the entire file in
 // memory to be able to rewind arbitrarily for.
 //
 // It is implemented as a ring-buffer: the current offset in buf to read
-// from is in readOffset, and the currentOffset to copy values read from
+// from is in readOffset, and the current offset to copy values read from
 // the reader to is in writeOffset.  Both of these are taken mod bufSize
 // when used to compute offsets into buf.
 type somewhatSeekableReader struct {
@@ -187,48 +187,94 @@ func makeSomewhatSeekableReader(r io.Reader, maxSeek int) *somewhatSeekableReade
 }
 
 func (ssr *somewhatSeekableReader) Read(b []byte) (int, error) {
-	// If the caller has called Seek() to move backwards from the
+	// If the caller has called SeekTo() to move backwards from the
 	// current read point of the underlying reader R, we start by
 	// copying values from our local buffer into the output buffer.
-	nCopied := 0
-	if ssr.readOffset < ssr.writeOffset {
-		for ; ssr.readOffset < ssr.writeOffset && nCopied < len(b); nCopied++ {
-			b[nCopied] = ssr.buf[ssr.readOffset%int64(len(ssr.buf))]
-			ssr.readOffset++
+	nCopy := int(ssr.writeOffset - ssr.readOffset)
+	if nCopy > 0 {
+		// Don't plan to copy more than the buffer can hold
+		if nCopy > len(b) {
+			nCopy = len(b)
 		}
+
+		start := int(ssr.readOffset % int64(len(ssr.buf)))
+		end := int((ssr.readOffset + int64(nCopy)) % int64(len(ssr.buf)))
+
+		// First, copy up to the end of the ring buffer (if needed).
+		n := copy(b[:nCopy], ssr.buf[start:])
+		if n < nCopy {
+			// If that wasn't enough, go and copy bytes from the start of
+			// the ring buffer.
+			n2 := copy(b[n:], ssr.buf[:end])
+			if n+n2 != nCopy {
+				panic("somewhatSeekableReader: logic error")
+			}
+		}
+
+		// Advance the b[] slice and the read offset to account for what
+		// we've copied.
+		b = b[nCopy:]
+		ssr.readOffset += int64(nCopy)
 	}
 
 	// Once we're through the values we have buffered from previous reads,
 	// we read from the underlying reader. Note that we read into b[]
 	// starting at the point where we stopped copying buffered values.
-	nRead, err := ssr.R.Read(b[nCopied:])
+	nRead, err := ssr.R.Read(b)
 
-	// Now update our local buffer of read values.  Note that this loop
-	// is a bit wasteful in the case where nRead > len(ssr.buf); some of
-	// the values it writes will be clobbered by a later iteration of
-	// the loop.  (It's not clear that this is a big enough issue to
-	// really worry about.)
-	for i := 0; i < nRead; i++ {
-		ssr.buf[ssr.writeOffset%int64(len(ssr.buf))] = b[nCopied+i]
-		ssr.readOffset++
-		ssr.writeOffset++
+	if nRead > 0 {
+		// Update the local buffer of read values.
+		if ssr.readOffset != ssr.writeOffset {
+			panic("somewhatSeekableReader: unexped offsets")
+		}
+		// First, advance the offsets to represent how far we are into the
+		// Reader.
+		ssr.readOffset += int64(nRead)
+		ssr.writeOffset += int64(nRead)
+
+		nSave := nRead
+		if nSave > len(ssr.buf) {
+			// Don't try to save more bytes than we have storage for in the
+			// buffer.
+			nSave = len(ssr.buf)
+			b = b[nRead-nSave:]
+		}
+
+		// Start and end offsets for where we'll be writing into the
+		// ring-buffer.
+		start := (ssr.writeOffset - int64(nSave)) % int64(len(ssr.buf))
+		end := ssr.writeOffset % int64(len(ssr.buf))
+
+		// First, copy from b up to the end of the buffer.
+		n := copy(ssr.buf[start:], b)
+		if n < nSave {
+			// If that wasn't enough, copy from the start of the buffer to
+			// the end offset.
+			n2 := copy(ssr.buf[:end], b[n:])
+			if n+n2 != nSave {
+				panic("somewhatSeekableReader: logic error")
+			}
+		}
 	}
 
-	return nCopied + nRead, err
+	return nCopy + nRead, err
 }
 
 func (ssr *somewhatSeekableReader) SeekTo(offset int64) error {
-	if offset > ssr.writeOffset {
+	switch {
+	case offset < 0:
+		return fmt.Errorf("invalid seek to negative offset %d", offset)
+	case offset > ssr.writeOffset:
 		// We could support seeking past the extent that the file has been
 		// read (by just doing a bunch of Read() calls), but this isn't
 		// really necessary currently...
 		return fmt.Errorf("invalid seek to %d, past current write offset %d",
 			offset, ssr.writeOffset)
-	}
-	if ssr.writeOffset-offset > int64(len(ssr.buf)) {
+	case ssr.writeOffset-offset > int64(len(ssr.buf)):
 		return fmt.Errorf("can't seek back to %d; current offset %d",
 			offset, ssr.writeOffset)
+	default:
+		ssr.readOffset = offset
+		return nil
 	}
-	ssr.readOffset = offset
-	return nil
 }
