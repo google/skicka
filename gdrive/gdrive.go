@@ -321,14 +321,16 @@ func (gd *GDrive) updateCache(svc *drive.Service, maxChangeId int64,
 	var about *drive.About
 	var err error
 
-	for try := 0; try < maxRetries; try++ {
+	for try := 0; ; try++ {
 		about, err = svc.About.Get().Do()
-		if err != nil {
+		if err == nil {
+			break
+		} else {
 			err = gd.tryToHandleDriveAPIError(err, try)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "skicka: %s\n", err)
-				os.Exit(1)
-			}
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "skicka: %s\n", err)
+			os.Exit(1)
 		}
 	}
 
