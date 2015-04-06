@@ -223,12 +223,12 @@ func (gd *GDrive) getFileById(id string) (*drive.File, error) {
 	}
 }
 
-// runQuery executes the given query with the Google Drive API, returning
-// an array of files that match the query's conditions.
-func (gd *GDrive) runQuery(query string) ([]*drive.File, error) {
+// runQuery executes the given query with the Google Drive API, calling the
+// given callback function with each file that matches the query's
+// conditions.
+func (gd *GDrive) runQuery(query string, process func(*drive.File)) error {
 	gd.debug("Running query: %s", query)
 	pageToken := ""
-	var result []*drive.File
 	for {
 		q := gd.svc.Files.List().Q(query)
 		if pageToken != "" {
@@ -238,11 +238,13 @@ func (gd *GDrive) runQuery(query string) ([]*drive.File, error) {
 		for try := 0; ; try++ {
 			r, err := q.Do()
 			if err == nil {
-				result = append(result, r.Items...)
+				for _, f := range r.Items {
+					process(f)
+				}
 				pageToken = r.NextPageToken
 				break
 			} else if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
-				return nil, err
+				return err
 			}
 		}
 
@@ -250,7 +252,7 @@ func (gd *GDrive) runQuery(query string) ([]*drive.File, error) {
 			break
 		}
 	}
-	return result, nil
+	return nil
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -825,14 +827,7 @@ func (gd *GDrive) AddProperty(key, value string, f *File) error {
 func (gd *GDrive) deleteIncompleteDriveFiles(title string, parentId string) {
 	query := fmt.Sprintf("title='%s' and '%s' in parents and trashed=false",
 		title, parentId)
-	files, err := gd.runQuery(query)
-	if err != nil {
-		gd.debug("unable to run query in deleteIncompleteDriveFiles(); "+
-			"ignoring error: %v", err)
-		return
-	}
-
-	for _, f := range files {
+	err := gd.runQuery(query, func(f *drive.File) {
 		for try := 0; ; try++ {
 			err := gd.svc.Files.Delete(f.Id).Do()
 			if err == nil {
@@ -842,6 +837,12 @@ func (gd *GDrive) deleteIncompleteDriveFiles(title string, parentId string) {
 					"for %s (ID %s): %v", title, f.Id, err)
 			}
 		}
+	})
+
+	if err != nil {
+		gd.debug("unable to run query in deleteIncompleteDriveFiles(); "+
+			"ignoring error: %v", err)
+		return
 	}
 }
 
