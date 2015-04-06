@@ -27,44 +27,48 @@ import (
 ///////////////////////////////////////////////////////////////////////////
 // Bandwidth-limiting io.Reader
 
-// Maximum number of bytes of data that we are currently allowed to
-// upload or download given the bandwidth limits set by the user, if any.
-// This value is reduced by the rateLimitedReader.Read() method when data is
-// uploaded or downloaded, and is periodically increased by the task
+// Maximum number of bytes of data that we are currently allowed to upload
+// or download given the bandwidth limits set by the user, if any.  These
+// values are reduced by the rateLimitedReader.Read() method when data is
+// uploaded or downloaded, and are periodically increased by the task
 // launched by launchBandwidthTask().
-var availableTransmitBytes int
+var availableUploadBytes, availableDownloadBytes int
+var uploadBandwidthLimited, downloadBandwidthLimited bool
 var bandwidthTaskRunning bool
 
-// Mutex to protect availableTransmitBytes.
+// Mutex to protect available{Upload,Download}Bytes.
 var bandwidthMutex sync.Mutex
 var bandwidthCond = sync.NewCond(&bandwidthMutex)
 
-func launchBandwidthTask(bytesPerSecond int) {
-	if bytesPerSecond == 0 {
-		// No limit, so no need to launch the task.
-		return
+func launchBandwidthTask(uploadBytesPerSecond, downloadBytesPerSecond int) {
+	if bandwidthTaskRunning {
+		panic("Rate-limited bandwidth management task already launched")
 	}
+
+	uploadBandwidthLimited = uploadBytesPerSecond != 0
+	downloadBandwidthLimited = downloadBytesPerSecond != 0
 
 	bandwidthMutex.Lock()
 	defer bandwidthMutex.Unlock()
-	if bandwidthTaskRunning {
-		return
-	}
-
 	bandwidthTaskRunning = true
+
 	go func() {
 		for {
 			bandwidthMutex.Lock()
 
 			// Release 1/8th of the per-second limit every 8th of a second.
 			// The 92/100 factor in the amount released adds some slop to
-			// account for TCP/IP overhead in an effort to have the actual
-			// bandwidth used not exceed the desired limit.
-			availableTransmitBytes += bytesPerSecond * 92 / 100 / 8
-			if availableTransmitBytes > bytesPerSecond {
+			// account for TCP/IP overhead and HTTP headers in an effort to
+			// have the actual bandwidth used not exceed the desired limit.
+			availableUploadBytes += uploadBytesPerSecond * 92 / 100 / 8
+			if availableUploadBytes > uploadBytesPerSecond {
 				// Don't ever queue up more than one second's worth of
 				// transmission.
-				availableTransmitBytes = bytesPerSecond
+				availableUploadBytes = uploadBytesPerSecond
+			}
+			availableDownloadBytes += downloadBytesPerSecond * 92 / 100 / 8
+			if availableDownloadBytes > downloadBytesPerSecond {
+				availableDownloadBytes = downloadBytesPerSecond
 			}
 
 			// Wake up any threads that are waiting for more bandwidth now
@@ -84,23 +88,38 @@ func launchBandwidthTask(bytesPerSecond int) {
 	}()
 }
 
-// rateLimitedReader is an io.Reader implementation that returns no more
-// bytes than the current value of availableTransmitBytes.  Thus, as long
-// as the upload and download paths wrap the underlying io.Readers for
-// local files and GETs from Drive (respectively), then we should stay
-// under the bandwidth per second limit.
+// rateLimitedReader is an io.ReadCloser implementation that returns no
+// more bytes than the current value of *availableBytes.  Thus, as long as
+// the upload and download paths wrap the underlying io.Readers for local
+// files and GETs from Drive (respectively), then we should stay under the
+// bandwidth per second limit.
 type rateLimitedReader struct {
-	R io.ReadCloser
+	R              io.ReadCloser
+	availableBytes *int
+}
+
+func makeLimitedUploadReader(r io.ReadCloser) io.ReadCloser {
+	if uploadBandwidthLimited {
+		return rateLimitedReader{R: r, availableBytes: &availableUploadBytes}
+	}
+	return r
+}
+
+func makeLimitedDownloadReader(r io.ReadCloser) io.ReadCloser {
+	if downloadBandwidthLimited {
+		return rateLimitedReader{R: r, availableBytes: &availableDownloadBytes}
+	}
+	return r
 }
 
 func (lr rateLimitedReader) Read(dst []byte) (int, error) {
 	// Loop until some amount of bandwidth is available.
 	bandwidthMutex.Lock()
 	for {
-		if availableTransmitBytes < 0 {
+		if *lr.availableBytes < 0 {
 			panic("bandwidth budget went negative")
 		}
-		if availableTransmitBytes > 0 {
+		if *lr.availableBytes > 0 {
 			break
 		}
 
@@ -114,13 +133,13 @@ func (lr rateLimitedReader) Read(dst []byte) (int, error) {
 	n := len(dst)
 
 	// but don't try to upload more than we're allowed to...
-	if n > availableTransmitBytes {
-		n = availableTransmitBytes
+	if n > *lr.availableBytes {
+		n = *lr.availableBytes
 	}
 
 	// Update the budget for the maximum amount of what we may consume and
 	// relinquish the lock so that other workers can claim bandwidth.
-	availableTransmitBytes -= n
+	*lr.availableBytes -= n
 	bandwidthMutex.Unlock()
 
 	read, err := lr.R.Read(dst[:n])
@@ -129,7 +148,7 @@ func (lr rateLimitedReader) Read(dst []byte) (int, error) {
 		// io.Reader is less than the caller asked for; in this case,
 		// we give back the bandwidth that we reserved but didn't use.
 		bandwidthMutex.Lock()
-		availableTransmitBytes += n - read
+		*lr.availableBytes += n - read
 		bandwidthMutex.Unlock()
 	}
 

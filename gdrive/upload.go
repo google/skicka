@@ -39,14 +39,7 @@ import (
 func (gd *GDrive) UploadFileContents(f *File, contentsReader io.Reader,
 	length int64, try int) error {
 	// Limit upload bandwidth, if requested..
-	if gd.uploadBytesPerSecond > 0 {
-		// Kick off a background thread to periodically allow uploading
-		// a bit more data.  This allowance is consumed by the
-		// rateLimitedReader Read() function.
-		launchBandwidthTask(gd.uploadBytesPerSecond)
-
-		contentsReader = &rateLimitedReader{R: ioutil.NopCloser(contentsReader)}
-	}
+	contentsReader = makeLimitedUploadReader(ioutil.NopCloser(contentsReader))
 
 	// Get the PUT request for the upload.
 	req, err := prepareUploadPUT(f.Id, contentsReader, length)
@@ -367,11 +360,6 @@ func (gd *GDrive) UploadFileContentsResumable(file *File,
 		return err
 	}
 
-	// Kick off a background thread to periodically allow uploading
-	// a bit more data.  This allowance is consumed by the
-	// rateLimitedReader Read() function.
-	launchBandwidthTask(gd.uploadBytesPerSecond)
-
 	// TODO: what is a reasonable default here? Must be 256kB minimum.
 	chunkSize := 1024 * 1024
 
@@ -401,9 +389,7 @@ func (gd *GDrive) UploadFileContentsResumable(file *File,
 			R: seekableReader,
 			N: end - currentOffset,
 		}
-		if gd.uploadBytesPerSecond > 0 {
-			body = &rateLimitedReader{R: ioutil.NopCloser(body)}
-		}
+		body = makeLimitedUploadReader(ioutil.NopCloser(body))
 
 		req, err := http.NewRequest("PUT", sessionURI, body)
 		if err != nil {

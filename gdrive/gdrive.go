@@ -159,13 +159,11 @@ var ErrMultipleFiles = errors.New("multiple files on Drive")
 // Drive. It provides a variety of methods for working with files and
 // folders stored in Google Drive.
 type GDrive struct {
-	oAuthTransport         *oauth.Transport
-	svc                    *drive.Service
-	debug                  func(s string, args ...interface{})
-	uploadBytesPerSecond   int
-	downloadBytesPerSecond int
-	dirToFiles             map[string][]*File
-	pathToFile             map[string][]*File
+	oAuthTransport *oauth.Transport
+	svc            *drive.Service
+	debug          func(s string, args ...interface{})
+	dirToFiles     map[string][]*File
+	pathToFile     map[string][]*File
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -285,9 +283,7 @@ func New(clientId, clientSecret, cacheFile string,
 	gd := GDrive{oAuthTransport: &oauth.Transport{
 		Config: config,
 	},
-		debug:                  debug,
-		uploadBytesPerSecond:   uploadBytesPerSecond,
-		downloadBytesPerSecond: downloadBytesPerSecond,
+		debug: debug,
 	}
 
 	gd.oAuthTransport.Transport = transport
@@ -310,6 +306,8 @@ func New(clientId, clientSecret, cacheFile string,
 	if err != nil {
 		return nil, err
 	}
+
+	launchBandwidthTask(uploadBytesPerSecond, downloadBytesPerSecond)
 
 	gd.UpdateMetadataCache(cacheFilename)
 
@@ -747,11 +745,7 @@ func (gd *GDrive) GetFileContents(f *File) (io.ReadCloser, error) {
 		switch gd.handleHTTPResponse(resp, err, try) {
 		case Success:
 			// Rate-limit the download, if required.
-			if gd.downloadBytesPerSecond > 0 {
-				launchBandwidthTask(gd.downloadBytesPerSecond)
-				return rateLimitedReader{R: resp.Body}, nil
-			}
-			return resp.Body, nil
+			return makeLimitedDownloadReader(resp.Body), nil
 		case Fail:
 			return nil, err
 		case Retry:
