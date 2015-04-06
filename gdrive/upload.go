@@ -77,9 +77,13 @@ func (gd *GDrive) UploadFileContents(f *File, contentsReader io.Reader,
 		// Otherwise tell the caller to please set up the reader, etc.,
 		// again and retry...
 		if resp != nil {
-			b, _ := ioutil.ReadAll(resp.Body)
-			return RetryHTTPTransmitError{StatusCode: resp.StatusCode,
-				StatusBody: string(b)}
+			if resp.Body != nil {
+				b, _ := ioutil.ReadAll(resp.Body)
+				return RetryHTTPTransmitError{StatusCode: resp.StatusCode,
+					StatusBody: string(b)}
+			} else {
+				return RetryHTTPTransmitError{StatusCode: resp.StatusCode}
+			}
 		}
 		return RetryHTTPTransmitError{StatusCode: 500, StatusBody: err.Error()}
 	default:
