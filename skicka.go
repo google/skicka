@@ -748,6 +748,7 @@ func main() {
 	vb := flag.Bool("verbose", false, "Enable verbose output")
 	dbg := flag.Bool("debug", false, "Enable debugging output")
 	dumpHTTP := flag.Bool("dump-http", false, "Dump http traffic")
+	flakyHTTP := flag.Bool("flaky-http", false, "Add flakiness to http traffic")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -795,6 +796,9 @@ func main() {
 	}
 
 	transport := http.DefaultTransport
+	if *flakyHTTP {
+		transport = newFlakyTransport(transport)
+	}
 	if *dumpHTTP {
 		transport = loggingTransport{transport: transport}
 	}

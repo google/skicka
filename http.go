@@ -41,7 +41,6 @@ func (akt addKeyTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 type loggingTransport struct {
 	transport http.RoundTripper
-	gd        *GDrive
 }
 
 func (lt loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -49,7 +48,7 @@ func (lt loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	if err != nil {
 		// Don't report an error back from RoundTrip() just because
 		// DumpRequestOut() ran into trouble.
-		lt.gd.debug("error dumping http request: %v", err)
+		debug.Printf("error dumping http request: %v", err)
 	}
 
 	resp, err := lt.transport.RoundTrip(req)
@@ -71,16 +70,22 @@ func newFlakyTransport(transport http.RoundTripper) http.RoundTripper {
 
 func (ft flakyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if time.Now().After(ft.endTime) {
-		if ft.rng.Float32() > .01 {
+		if ft.rng.Float32() > .03 {
 			return ft.transport.RoundTrip(req)
 		}
-		delta := time.Duration(ft.rng.Int31()%(10*1000)) * time.Millisecond
+		delta := time.Duration(ft.rng.Int31()%(90*1000)) * time.Millisecond
 		ft.endTime = time.Now().Add(delta)
-		log.Printf("Flaky http until %s", ft.endTime.String())
+		debug.Printf("Flaky http for %s", delta.String())
 	}
 
-	codes := []int{401, 403, 404, 408, 500, 503}
-	c := codes[int(ft.rng.Int31())%len(codes)]
-	return &http.Response{Status: fmt.Sprintf("%d ERROR", c), StatusCode: c},
-		fmt.Errorf("OH NO")
+	if (ft.rng.Int() % 2) == 0 {
+		codes := []int{401, 403, 404, 408, 500, 503}
+		c := codes[int(ft.rng.Int31())%len(codes)]
+		debug.Printf("Dropping http request %+v -> %c", req, c)
+		return &http.Response{Status: fmt.Sprintf("%d Flaky Error", c), StatusCode: c,
+			Request: req}, nil
+	} else {
+		debug.Printf("Returning error from http request %+v", req)
+		return nil, fmt.Errorf("flaky http error")
+	}
 }
