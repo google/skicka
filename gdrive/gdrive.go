@@ -307,6 +307,9 @@ func New(clientId, clientSecret, cacheFile string,
 	gd.oAuthTransport.Token = token
 
 	gd.svc, err = drive.New(gd.oAuthTransport.Client())
+	if err != nil {
+		return nil, err
+	}
 
 	gd.UpdateMetadataCache(cacheFilename)
 
