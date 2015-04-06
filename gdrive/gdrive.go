@@ -268,9 +268,9 @@ func (gd *GDrive) runQuery(query string) ([]*drive.File, error) {
 //
 // Finally, if debug is true, then debugging information will be printed as
 // operations are performed.
-func New(clientId, clientSecret, apiKey, cacheFile string,
+func New(clientId, clientSecret, cacheFile string,
 	uploadBytesPerSecond, downloadBytesPerSecond int,
-	debug func(s string, args ...interface{}), dumpHTTP bool,
+	debug func(s string, args ...interface{}), transport http.RoundTripper,
 	cacheFilename string) (*GDrive, error) {
 	config := &oauth.Config{
 		ClientId:     clientId,
@@ -290,13 +290,6 @@ func New(clientId, clientSecret, apiKey, cacheFile string,
 		downloadBytesPerSecond: downloadBytesPerSecond,
 	}
 
-	transport := http.DefaultTransport
-	if dumpHTTP {
-		transport = loggingTransport{transport: transport, gd: &gd}
-	}
-	if apiKey != "" {
-		transport = addKeyTransport{transport: transport, key: apiKey}
-	}
 	gd.oAuthTransport.Transport = transport
 
 	token, err := config.TokenCache.Token()

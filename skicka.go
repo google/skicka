@@ -35,6 +35,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
 	"regexp"
 	"runtime"
@@ -793,10 +794,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	transport := http.DefaultTransport
+	if *dumpHTTP {
+		transport = loggingTransport{transport: transport}
+	}
+	if config.Google.ApiKey != "" {
+		transport = addKeyTransport{transport: transport, key: config.Google.ApiKey}
+	}
+
 	var err error
 	gd, err = gdrive.New(config.Google.ClientId, config.Google.ClientSecret,
-		config.Google.ApiKey, *tokenCacheFilename, config.Upload.Bytes_per_second_limit,
-		config.Download.Bytes_per_second_limit, dpf, *dumpHTTP, *metadataCacheFilename)
+		*tokenCacheFilename, config.Upload.Bytes_per_second_limit,
+		config.Download.Bytes_per_second_limit, dpf, transport,
+		*metadataCacheFilename)
 	if err != nil {
 		printErrorAndExit(fmt.Errorf("error creating Google Drive "+
 			"client: %v", err))

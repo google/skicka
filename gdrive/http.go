@@ -19,10 +19,8 @@ package gdrive
 
 import (
 	"fmt"
-	"log"
-	mathrand "math/rand"
+	"math/rand"
 	"net/http"
-	"net/http/httputil"
 	"time"
 )
 
@@ -84,40 +82,9 @@ func (gd *GDrive) handleHTTPResponse(resp *http.Response, err error,
 	return Retry
 }
 
-type addKeyTransport struct {
-	transport http.RoundTripper
-	key       string
-}
-
-func (akt addKeyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL.RawQuery != "" {
-		req.URL.RawQuery += "&"
-	}
-	req.URL.RawQuery += "key=" + akt.key
-	return akt.transport.RoundTrip(req)
-}
-
-type loggingTransport struct {
-	transport http.RoundTripper
-	gd        *GDrive
-}
-
-func (lt loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	dump, err := httputil.DumpRequestOut(req, false)
-	if err != nil {
-		// Don't report an error back from RoundTrip() just because
-		// DumpRequestOut() ran into trouble.
-		lt.gd.debug("error dumping http request: %v", err)
-	}
-
-	resp, err := lt.transport.RoundTrip(req)
-	log.Printf("http request: %s--->response: %+v\n--->err: %v", dump, resp, err)
-	return resp, err
-}
-
 func (gd *GDrive) exponentialBackoff(try int, resp *http.Response, err error) {
 	s := time.Duration(1<<uint(try))*time.Second +
-		time.Duration(mathrand.Int()%1000)*time.Millisecond
+		time.Duration(rand.Int()%1000)*time.Millisecond
 	time.Sleep(s)
 	if resp != nil {
 		gd.debug("exponential backoff: slept %v for resp %d...", s,
