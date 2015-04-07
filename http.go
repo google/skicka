@@ -84,8 +84,7 @@ func (ft flakyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		debug.Printf("Dropping http request %+v -> %c", req, c)
 		return &http.Response{Status: fmt.Sprintf("%d Flaky Error", c), StatusCode: c,
 			Request: req}, nil
-	} else {
-		debug.Printf("Returning error from http request %+v", req)
-		return nil, fmt.Errorf("flaky http error")
 	}
+	debug.Printf("Returning error from http request %+v", req)
+	return nil, fmt.Errorf("flaky http error")
 }
