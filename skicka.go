@@ -138,22 +138,6 @@ func (d debugging) Printf(format string, args ...interface{}) {
 	}
 }
 
-// fileCloser is kind of a hack: it implements the io.ReadCloser
-// interface, wherein the Read() calls go to R, and the Close() call
-// goes to C.
-type fileCloser struct {
-	R io.Reader
-	C *os.File
-}
-
-func (fc *fileCloser) Read(b []byte) (int, error) {
-	return fc.R.Read(b)
-}
-
-func (fc *fileCloser) Close() error {
-	return fc.C.Close()
-}
-
 // byteCountingReader keeps tracks of how many bytes are actually read via
 // Read() calls.
 type byteCountingReader struct {
@@ -324,7 +308,11 @@ func getFileContentsReaderForUpload(path string, encrypt bool,
 		// Prepend the initialization vector to the returned bytes.
 		r = io.MultiReader(bytes.NewReader(iv[:aes.BlockSize]), r)
 
-		return &fileCloser{R: r, C: f}, fileSize + aes.BlockSize, nil
+		readCloser := struct {
+			io.Reader
+			io.Closer
+		}{r, f}
+		return readCloser, fileSize + aes.BlockSize, nil
 	}
 	return f, fileSize, nil
 }
