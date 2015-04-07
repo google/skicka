@@ -639,7 +639,7 @@ Commands and their options are:
   du         Print the space used by the Google Drive folder and its children.
              Arguments: [drive_path ...]
 
-  fsck-experimental [EXPERIMENTAL] Use at your own risk.
+  fsck       [EXPERIMENTAL/NEW] Use at your own risk.
              Perform a number of consistency checks on files stored in Google
              Drive, including verifying metadata and removing duplicate files
              with the same name.
@@ -698,11 +698,12 @@ General options valid for all commands:
 
 func shortUsage() {
 	fmt.Fprintf(os.Stderr, `usage: skicka [skicka options] <command> [command options]
+
 Supported commands are:
   cat       Print the contents of the given file
   download  Download a file or folder hierarchy from Drive to the local disk
   du        Report disk usage for a folder hierarchy on Drive
-  fsck-experimental
+  fsck      Check consistency of files in Drive and local metadata cache
   genkey    Generate a new encryption key
   init      Create an initial skicka configuration file
   ls        List the contents of a folder on Google Drive
@@ -777,7 +778,7 @@ func main() {
 	// Check this before creating the GDrive object so that we don't spend
 	// a lot of time updating the cache if we were just going to print the
 	// usage message.
-	if cmd != "cat" && cmd != "download" && cmd != "du" && cmd != "fsck-experimental" &&
+	if cmd != "cat" && cmd != "download" && cmd != "du" && cmd != "fsck" &&
 		cmd != "ls" && cmd != "mkdir" && cmd != "rm" && cmd != "upload" {
 		shortUsage()
 		os.Exit(1)
@@ -814,7 +815,7 @@ func main() {
 		errs = download(args)
 	case "du":
 		errs = du(args)
-	case "fsck-experimental":
+	case "fsck":
 		errs = fsck(args, *metadataCacheFilename)
 	case "ls":
 		errs = ls(args)

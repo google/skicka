@@ -24,6 +24,7 @@ import (
 	"github.com/google/skicka/gdrive"
 	"os"
 	"strings"
+	"time"
 )
 
 func fsck(args []string, metadataCacheFilename string) int {
@@ -62,6 +63,7 @@ mistake, it should be possible to salvage the file from the trash.
 **** WARNING WARNING DANGER ****
 
 `)
+		time.Sleep(10 * time.Second)
 	}
 
 	includeBase := true
