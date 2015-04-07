@@ -598,7 +598,7 @@ func (gd *GDrive) UpdateMetadataCache(filename string) error {
 	if err != nil {
 		return err
 	}
-	rootFile := newFile(string(os.PathSeparator), rootDriveFile)
+	rootFile := newFile(".", rootDriveFile)
 	gd.pathToFile[rootFile.Path] = append(gd.pathToFile[rootFile.Path], rootFile)
 
 	for _, file := range idToFile {
@@ -618,9 +618,6 @@ func (gd *GDrive) UpdateMetadataCache(filename string) error {
 			gd.pathToFile[p] = append(gd.pathToFile[p], f)
 
 			dir := filepath.Dir(p)
-			if dir == "." {
-				dir = string(os.PathSeparator)
-			}
 			gd.dirToFiles[dir] = append(gd.dirToFiles[dir], f)
 		}
 	}
@@ -657,10 +654,12 @@ func (gd *GDrive) GetFile(path string) (*File, error) {
 
 func canonicalPath(path string) string {
 	path = filepath.Clean(path)
-	if path == "." {
-		path = string(os.PathSeparator)
-	} else if len(path) > 1 && path[0] == os.PathSeparator {
-		path = path[1:]
+	if path[0] == os.PathSeparator {
+		if len(path) > 1 {
+			path = path[1:]
+		} else {
+			path = "."
+		}
 	}
 	return path
 }
@@ -676,13 +675,10 @@ func canonicalPath(path string) string {
 func (gd *GDrive) GetFiles(path string) []*File {
 	path = canonicalPath(path)
 	var files []*File
-	if path == string(os.PathSeparator) {
+	if path == "." {
 		files = append(files, gd.pathToFile[path][0])
 	} else {
 		d := filepath.Dir(path)
-		if d == "." {
-			d = "/"
-		}
 		for _, f := range gd.dirToFiles[d] {
 			if filepath.Base(f.Path) == filepath.Base(path) {
 				files = append(files, f)
