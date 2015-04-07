@@ -601,7 +601,7 @@ func (gd *GDrive) UpdateMetadataCache(filename string) error {
 	rootFile := newFile(".", rootDriveFile)
 	gd.pathToFile[rootFile.Path] = append(gd.pathToFile[rootFile.Path], rootFile)
 
-	for _, file := range idToFile {
+	for _, f := range idToFile {
 		// Because files in Google Drive may have multiple parent folders
 		// (which themselves may have multiple parents), each file may have
 		// multiple paths that refer to it.  To find them, we start from the
@@ -609,16 +609,22 @@ func (gd *GDrive) UpdateMetadataCache(filename string) error {
 		// the parent folder's name to the in-progress path until we hit the
 		// root directory.  The path is then added to the paths array.
 		var paths []string
-		for _, parentId := range file.ParentIds {
-			getPath(filepath.Base(file.Path), parentId, idToFile, &paths)
+		for _, parentId := range f.ParentIds {
+			getPath(f.Path, parentId, idToFile, &paths)
 		}
 		for _, p := range paths {
-			f := file
-			f.Path = p
-			gd.pathToFile[p] = append(gd.pathToFile[p], f)
+			// Create a new File instance for each path where this file is
+			// found. (We don't want to clobber the Path member if there
+			// are multiple paths).  See the TODO above the File struct
+			// declaration for an issue with this approach, though.
+			file := new(File)
+			*file = *f
+			file.Path = p
+
+			gd.pathToFile[p] = append(gd.pathToFile[p], file)
 
 			dir := filepath.Dir(p)
-			gd.dirToFiles[dir] = append(gd.dirToFiles[dir], f)
+			gd.dirToFiles[dir] = append(gd.dirToFiles[dir], file)
 		}
 	}
 
