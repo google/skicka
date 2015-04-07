@@ -567,9 +567,7 @@ func (gd *GDrive) UpdateMetadataCache(filename string) error {
 			newMaxChangeId = c.Id
 
 			if c.Deleted || (c.File != nil && c.File.Labels != nil && c.File.Labels.Trashed) {
-				if _, ok := idToFile[c.FileId]; ok {
-					delete(idToFile, c.FileId)
-				}
+				delete(idToFile, c.FileId)
 			} else {
 				// For the files in the idToFile map, we overload File.Path
 				// to store the file's name for now.
