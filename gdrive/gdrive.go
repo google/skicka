@@ -610,7 +610,7 @@ func (gd *GDrive) UpdateMetadataCache(filename string) error {
 		// root directory.  The path is then added to the paths array.
 		var paths []string
 		for _, parentId := range f.ParentIds {
-			getPath(f.Path, parentId, idToFile, &paths)
+			getFilePath(f.Path, parentId, idToFile, &paths)
 		}
 		for _, p := range paths {
 			// Create a new File instance for each path where this file is
@@ -631,15 +631,15 @@ func (gd *GDrive) UpdateMetadataCache(filename string) error {
 	return nil
 }
 
-func getPath(p string, parentId string, idToFile map[string]*File, paths *[]string) {
-	parentFile, ok := idToFile[parentId]
-	if !ok {
-		*paths = append(*paths, p)
-	} else {
-		for _, ppid := range parentFile.ParentIds {
-			newp := filepath.Join(filepath.Base(parentFile.Path), p)
-			getPath(newp, ppid, idToFile, paths)
+func getFilePath(path string, parentId string, idToFile map[string]*File, paths *[]string) {
+	if parentFile, ok := idToFile[parentId]; ok {
+		for _, grandParentId := range parentFile.ParentIds {
+			newPath := filepath.Join(parentFile.Path, path)
+			getFilePath(newPath, grandParentId, idToFile, paths)
 		}
+	} else {
+		// We're at the root, which doesn't have a parent.
+		*paths = append(*paths, path)
 	}
 }
 
