@@ -265,8 +265,12 @@ func syncHierarchyDown(driveBasePath string, localBasePath string, trustTimes bo
 // Create a map, indexed by Google Drive file Id, that gives the local
 // pathname to use for the corresponding Google Drive file.
 func createPathMap(files []*gdrive.File, localBasePath, driveBasePath string) map[string]string {
-	if len(driveBasePath) > 1 && driveBasePath[0] == os.PathSeparator {
-		driveBasePath = driveBasePath[1:]
+	if driveBasePath[0] == os.PathSeparator {
+		if len(driveBasePath) > 1 {
+			driveBasePath = driveBasePath[1:]
+		} else {
+			driveBasePath = ""
+		}
 	}
 
 	m := make(map[string]string)
