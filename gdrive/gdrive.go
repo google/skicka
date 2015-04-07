@@ -769,11 +769,10 @@ func canonicalPath(path string) string {
 // GetFiles returns File structures for *all* of the files in Google Drive
 // that correspond to the given path. Because Google Drive allows multiple
 // files to have the same title (and allows multiple folders of the same
-// name), this is more complicated than it might seen.
+// name), more than one file may be returned
 //
 // Note: an error is not returned if the file doesn't exist; the caller
-// should detect that case by detecting a zero-length returned array for
-// that case.
+// should detect that case by checking for a zero-length returned array.
 func (gd *GDrive) GetFiles(path string) []*File {
 	path = canonicalPath(path)
 	var files []*File
@@ -903,9 +902,9 @@ func (gd *GDrive) getFolderContentsRecursive(parentFolder *File, files *Files) {
 // GetFileContents returns an io.ReadCloser that provides the contents of
 // the given File.
 func (gd *GDrive) GetFileContents(f *File) (io.ReadCloser, error) {
-	// The file download URL expires some hours after it's retrieved;
-	// re-grab the file right before downloading it so that we have a
-	// fresh URL.
+	// The file download URL expires some hours after it's retrieved, so we
+	// can't really cache it.  Re-grab the full *drive.File right before
+	// downloading it so that we have a fresh URL.
 	driveFile, err := gd.getFileById(f.Id)
 	if err != nil {
 		return nil, err
@@ -1123,7 +1122,7 @@ func (gd *GDrive) insertFile(f *drive.File) (*drive.File, error) {
 	}
 }
 
-// DeleteFile deletes the given file from Google Drive; note that delection
+// DeleteFile deletes the given file from Google Drive; note that deletion
 // is permanent and un-reversable!  (Consider TrashFile instead.)
 func (gd *GDrive) DeleteFile(f *File) error {
 	for try := 0; ; try++ {
@@ -1131,7 +1130,7 @@ func (gd *GDrive) DeleteFile(f *File) error {
 		if err == nil {
 			return nil
 		} else if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
-			return fmt.Errorf("unable to delete file %s: %v", f.Path, err)
+			return fmt.Errorf("%s: unable to delete: %v", f.Path, err)
 		}
 	}
 }
@@ -1144,7 +1143,7 @@ func (gd *GDrive) TrashFile(f *File) error {
 		if err == nil {
 			return nil
 		} else if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
-			return fmt.Errorf("unable to trash file %s: %v", f.Path, err)
+			return fmt.Errorf("%s: unable to trash: %v", f.Path, err)
 		}
 	}
 }
