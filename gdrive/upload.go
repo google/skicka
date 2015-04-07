@@ -205,7 +205,7 @@ func (gd *GDrive) getCurrentChunkStart(sessionURI string, contentLength int64,
 
 		defer resp.Body.Close()
 
-		if resp.StatusCode == 200 || resp.StatusCode == 201 {
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
 			// 200 or 201 here says we're actually all done
 			gd.debug("All done: %d from get content-range response",
 				resp.StatusCode)
@@ -218,7 +218,7 @@ func (gd *GDrive) getCurrentChunkStart(sessionURI string, contentLength int64,
 			gd.debug("Updated start to %d after 308 from get "+
 				"content-range...", *currentOffset)
 			return Retry, nil
-		} else if resp.StatusCode == 401 {
+		} else if resp.StatusCode == http.StatusUnauthorized {
 			gd.debug("Trying OAuth2 token refresh.")
 			for r := 0; r < 6; r++ {
 				if err = gd.oAuthTransport.Refresh(); err == nil {
@@ -265,7 +265,7 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
 		if err != nil {
 			return Fail, fmt.Errorf("giving up after %d retries: %v",
 				maxRetries, err)
-		} else if resp.StatusCode == 403 {
+		} else if resp.StatusCode == http.StatusForbidden {
 			return Fail, fmt.Errorf("giving up after %d retries: "+
 				"rate limit exceeded", maxRetries)
 		} else {
@@ -302,7 +302,7 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
 		gd.debug("Updated currentOffset to %d after 308", *currentOffset)
 		return Retry, nil
 
-	case resp.StatusCode == 404:
+	case resp.StatusCode == http.StatusNotFound:
 		// The upload URI has expired; we need to refresh it. (It
 		// has a ~24 hour lifetime.)
 		*sessionURI, err = gd.getResumableUploadURI(f, contentType,
@@ -317,7 +317,7 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
 		return gd.getCurrentChunkStart(*sessionURI, contentLength,
 			currentOffset)
 
-	case resp.StatusCode == 401:
+	case resp.StatusCode == http.StatusUnauthorized:
 		// After an hour, the OAuth2 token expires and needs to
 		// be refreshed.
 		gd.debug("Trying OAuth2 token refresh.")

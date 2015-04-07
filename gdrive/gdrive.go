@@ -218,7 +218,7 @@ func (gd *GDrive) tryToHandleDriveAPIError(err error, try int) error {
 	}
 	switch err := err.(type) {
 	case *googleapi.Error:
-		if err.Code == 401 {
+		if err.Code == http.StatusUnauthorized {
 			// After an hour, the OAuth2 token expires and needs to
 			// be refreshed.
 			gd.debug("Trying OAuth2 token refresh.")

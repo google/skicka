@@ -62,7 +62,7 @@ func (gd *GDrive) handleHTTPResponse(resp *http.Response, err error,
 		return Fail
 	}
 
-	if resp != nil && resp.StatusCode == 401 {
+	if resp != nil && resp.StatusCode == http.StatusUnauthorized {
 		// After an hour, the OAuth2 token expires and needs to
 		// be refreshed.
 		gd.debug("Trying OAuth2 token refresh.")
