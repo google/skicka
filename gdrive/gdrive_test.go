@@ -27,42 +27,21 @@
 package gdrive
 
 import (
+	"sort"
 	"testing"
 )
 
-func TestGetSorted(t *testing.T) {
-	f := newFiles()
-	f.add(&File{Path: "aaa"})
-	f.add(&File{Path: "c"})
-	f.add(&File{Path: "b"})
-	f.add(&File{Path: "aaa"})
-	f.add(&File{Path: "b"})
-	f.add(&File{Path: "z"})
-
-	files := f.GetSorted()
-
-	expected := []string{"aaa", "aaa", "b", "b", "c", "z"}
-	if len(files) != len(expected) {
-		t.Fatalf("Expected %d sorted files, got %v", len(expected), len(files))
-	}
-	for i := range expected {
-		if files[i].Path != expected[i] {
-			t.Fatalf("Expected \"%s\" for %d'th sorted file, got %v", expected[i],
-				i, files[i])
-		}
-	}
-}
-
 func TestGetSortedUnique(t *testing.T) {
-	f := newFiles()
-	f.add(&File{Path: "aaa"})
-	f.add(&File{Path: "c"})
-	f.add(&File{Path: "b"})
-	f.add(&File{Path: "aaa"})
-	f.add(&File{Path: "b"})
-	f.add(&File{Path: "z"})
+	var f []*File
+	f = append(f, &File{Path: "aaa"})
+	f = append(f, &File{Path: "c"})
+	f = append(f, &File{Path: "b"})
+	f = append(f, &File{Path: "aaa"})
+	f = append(f, &File{Path: "b"})
+	f = append(f, &File{Path: "z"})
+	sort.Sort(byPath(f))
 
-	files, dupes := f.GetSortedUnique()
+	files, dupes := PartitionUniquesAndMultiples(f)
 	if len(files) != 2 {
 		t.Fatalf("Expected 2 unique files, got %v: %v", len(files), files)
 	}

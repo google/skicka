@@ -744,9 +744,8 @@ func filesEqual(fa, fb *File) bool {
 // (Note that File is used to represent both files and folders in Google
 // Drive.)
 func (gd *GDrive) GetFile(path string) (*File, error) {
-	path = canonicalPath(path)
-	files, ok := gd.pathToFile[path]
-	if !ok {
+	files := gd.GetFiles(path)
+	if len(files) == 0 {
 		return nil, ErrNotExist
 	} else if len(files) > 1 {
 		return nil, ErrMultipleFiles
@@ -774,101 +773,48 @@ func canonicalPath(path string) string {
 // Note: an error is not returned if the file doesn't exist; the caller
 // should detect that case by checking for a zero-length returned array.
 func (gd *GDrive) GetFiles(path string) []*File {
-	path = canonicalPath(path)
-	var files []*File
-	if path == "." {
-		files = append(files, gd.pathToFile[path][0])
-	} else {
-		d := filepath.Dir(path)
-		for _, f := range gd.dirToFiles[d] {
-			if filepath.Base(f.Path) == filepath.Base(path) {
-				files = append(files, f)
-			}
-		}
-	}
-	return files
+	return gd.pathToFile[canonicalPath(path)]
 }
 
-// GetFilesInFolder returns a Files object representing the files in the
-// given folder with the given name.
-func (gd *GDrive) GetFilesInFolder(path string) (Files, error) {
-	files := newFiles()
-	dirFiles, ok := gd.dirToFiles[canonicalPath(path)]
-	if !ok {
-		return files, ErrNotExist
+// GetFilesInFolder returns a *File array representing the files in the
+// given folder with the given name. The files are sorted by pathname.
+func (gd *GDrive) GetFilesInFolder(path string) ([]*File, error) {
+	if dirFiles, ok := gd.dirToFiles[canonicalPath(path)]; ok {
+		sort.Sort(byPath(dirFiles))
+		return dirFiles, nil
 	}
-
-	for _, f := range dirFiles {
-		files.add(f)
-	}
-	return files, nil
+	return nil, ErrNotExist
 }
 
-// Files represents a cached mapping between pathnames and files stored in
-// Google Drive.
-type Files struct {
-	files map[string][]*File
-}
-
-func newFiles() Files {
-	var f Files
-	f.files = make(map[string][]*File)
-	return f
-}
-
-// Add takes a pathname and a File and records that the given file lives at
-// the given path in Google Drive.
-func (f Files) add(file *File) {
-	if file.Path != canonicalPath(file.Path) {
-		panic(fmt.Sprintf("unclean path: %s", file.Path))
-	}
-
-	f.files[file.Path] = append(f.files[file.Path], file)
-}
-
-// GetSorted returns a array of File structures, one for each Google Drive
-// file represented by the Files object.  The array is sorted by the files
-// pathnames.
-func (f Files) GetSorted() []*File {
-	var files []*File
-	for _, fileArray := range f.files {
-		for _, f := range fileArray {
-			files = append(files, f)
-		}
-	}
+// PartitionUniquesAndMultiples partitions all of the files by path name
+// and then returns an array of File structures for the uniquely-named
+// files and a map from path names to arrays of files for cases where more
+// than one file has the same pathname.
+func PartitionUniquesAndMultiples(files []*File) ([]*File, map[string][]*File) {
 	sort.Sort(byPath(files))
-	return files
-}
 
-// GetSortedUnique sorts all of the files by path name and then returns two
-// arrays of File structures.  The first includes all unique files--ones
-// that only have a single file with that pathname on Drive.  The second has
-// all files where there are two or more files with that name on Drive.
-func (f Files) GetSortedUnique() ([]*File, map[string][]*File) {
-	allFiles := f.GetSorted()
-
-	var files []*File
-	dupes := make(map[string][]*File)
-	for i, f := range allFiles {
+	var uniques []*File
+	multiples := make(map[string][]*File)
+	for i, f := range files {
 		// Non-duplicated files are different than their neighbors on both
 		// sides (if present).
-		if (i == 0 || f.Path != allFiles[i-1].Path) &&
-			(i == len(allFiles)-1 || f.Path != allFiles[i+1].Path) {
-			files = append(files, f)
+		if (i == 0 || f.Path != files[i-1].Path) &&
+			(i == len(files)-1 || f.Path != files[i+1].Path) {
+			uniques = append(uniques, f)
 		} else {
-			dupes[f.Path] = append(dupes[f.Path], f)
+			multiples[f.Path] = append(multiples[f.Path], f)
 		}
 	}
 
-	return files, dupes
+	return uniques, multiples
 }
 
-// GetFilesUnderFolder returns a Files object that represents all of the
+// GetFilesUnderFolder returns an array of File pointers that represents all of the
 // files stored in GoogleDrive under the given path.  The 'includeBase'
 // parameter indicates whether the file corresponding to the given path's
 // folder should be included.
-func (gd *GDrive) GetFilesUnderFolder(path string, includeBase bool) (Files, error) {
-	files := newFiles()
+func (gd *GDrive) GetFilesUnderFolder(path string, includeBase bool) ([]*File, error) {
+	var files []*File
 
 	// Start by getting the file or files that correspond to the given
 	// path.
@@ -880,19 +826,21 @@ func (gd *GDrive) GetFilesUnderFolder(path string, includeBase bool) (Files, err
 	for _, f := range pathfiles {
 		if f.IsFolder() {
 			if includeBase {
-				files.add(f)
+				files = append(files, f)
 			}
 			gd.getFolderContentsRecursive(f, &files)
 		} else {
-			files.add(f)
+			files = append(files, f)
 		}
 	}
+
+	sort.Sort(byPath(files))
 	return files, nil
 }
 
-func (gd *GDrive) getFolderContentsRecursive(parentFolder *File, files *Files) {
+func (gd *GDrive) getFolderContentsRecursive(parentFolder *File, files *[]*File) {
 	for _, f := range gd.dirToFiles[parentFolder.Path] {
-		files.add(f)
+		*files = append(*files, f)
 		if f.IsFolder() {
 			gd.getFolderContentsRecursive(f, files)
 		}

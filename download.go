@@ -141,7 +141,7 @@ func syncHierarchyDown(driveBasePath string, localBasePath string, trustTimes bo
 	// We won't download files where there are multiple versions of the
 	// file with the same name on Drive.  Issue warnings about any dupes
 	// here.
-	uniqueDriveFiles, dupes := filesOnDrive.GetSortedUnique()
+	uniqueDriveFiles, dupes := gdrive.PartitionUniquesAndMultiples(filesOnDrive)
 	nDownloadErrors := int32(len(dupes))
 	for _, f := range dupes {
 		fmt.Fprintf(os.Stderr, "skicka: %s: skipping download of duplicate "+

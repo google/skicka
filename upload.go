@@ -71,14 +71,13 @@ func upload(args []string) int {
 		printErrorAndExit(err)
 	}
 
-	includeBase := true
-	driveFiles, err := gd.GetFilesUnderFolder(drivePath, includeBase)
-	if err != nil && err != gdrive.ErrNotExist {
-		printErrorAndExit(err)
+	f := gd.GetFiles(drivePath)
+	if len(f) > 1 {
+		printErrorAndExit(fmt.Errorf("%s: multiple files exist", drivePath))
 	}
 
 	syncStartTime = time.Now()
-	errs := syncHierarchyUp(localPath, drivePath, driveFiles, encrypt, trustTimes)
+	errs := syncHierarchyUp(localPath, drivePath, encrypt, trustTimes)
 	printFinalStats()
 
 	return errs
@@ -248,14 +247,13 @@ func uploadFileContents(localPath string, driveFile *gdrive.File, encrypt bool,
 // Synchronize a local directory hierarchy with Google Drive.
 // localPath is the file or directory to start with, driveRoot is
 // the directory into which the file/directory will be sent
-func syncHierarchyUp(localPath string, driveRoot string,
-	existingFiles gdrive.Files, encrypt bool, trustTimes bool) int {
+func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTimes bool) int {
 	if encrypt && key == nil {
 		key = decryptEncryptionKey()
 	}
 
 	fileMappings, nUploadErrors := compileUploadFileTree(localPath, driveRoot,
-		existingFiles, encrypt, trustTimes)
+		encrypt, trustTimes)
 	if len(fileMappings) == 0 {
 		fmt.Fprintln(os.Stderr, "skicka: No files to be uploaded.")
 		return 0
@@ -570,8 +568,8 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 	return false, gd.UpdateModificationTime(driveFile, stat.ModTime())
 }
 
-func compileUploadFileTree(localPath, drivePath string, existingFiles gdrive.Files,
-	encrypt bool, trustTimes bool) ([]localToRemoteFileMapping, int32) {
+func compileUploadFileTree(localPath, drivePath string,
+	encrypt, trustTimes bool) ([]localToRemoteFileMapping, int32) {
 	// Walk the local directory hierarchy starting at 'localPath' and build
 	// an array of files that may need to be synchronized.
 	var fileMappings []localToRemoteFileMapping

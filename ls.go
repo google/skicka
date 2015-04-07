@@ -115,7 +115,7 @@ func ls(args []string) int {
 			// all files under the folder, depending on whether the
 			// recursive option was specified.
 			includeBase := false
-			var files gdrive.Files
+			var files []*gdrive.File
 			var err error
 			if recursive {
 				files, err = gd.GetFilesUnderFolder(drivePath, includeBase)
@@ -129,10 +129,7 @@ func ls(args []string) int {
 				continue
 			}
 
-			// Sort the individual filenames returned.
-			sorted := files.GetSorted()
-
-			for _, f := range sorted {
+			for _, f := range files {
 				lsFile(f, recursive, long, longlong)
 			}
 

@@ -72,7 +72,7 @@ mistake, it should be possible to salvage the file from the trash.
 	}
 
 	errs := 0
-	uniques, dupes := files.GetSortedUnique()
+	uniques, dupes := gdrive.PartitionUniquesAndMultiples(files)
 	for _, f := range uniques {
 		errs += checkFile(f)
 	}

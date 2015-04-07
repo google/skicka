@@ -44,8 +44,6 @@ func du(args []string) int {
 			continue
 		}
 
-		sorted := files.GetSorted()
-
 		// folderSize keeps track of the size in bytes of each folder in
 		// the hierarchy.
 		folderSize := make(map[string]int64)
@@ -53,7 +51,7 @@ func du(args []string) int {
 		var dirNames []string
 		totalSize := int64(0)
 
-		for _, f := range sorted {
+		for _, f := range files {
 			if f.IsFolder() {
 				dirNames = append(dirNames, f.Path)
 			} else {
