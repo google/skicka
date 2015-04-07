@@ -504,6 +504,63 @@ func (gd *GDrive) UpdateMetadataCache(filename string) error {
 		}
 	}
 
+	idToFile, err := gd.getIdToFile(filename)
+	if err != nil {
+		return err
+	}
+
+	// Convert the idToFile map to one map from parent folder path to array
+	// of Files in the folder and to a second map from path to array of
+	// Files at that path.
+	gd.dirToFiles = make(map[string][]*File)
+	gd.pathToFile = make(map[string][]*File)
+
+	// TODO: store the root file metadata in the cache as well to avoid
+	// doing this each time.
+	rootDriveFile, err := gd.getFileById("root")
+	if err != nil {
+		return err
+	}
+	rootFile := newFile(".", rootDriveFile)
+	gd.pathToFile[rootFile.Path] = append(gd.pathToFile[rootFile.Path], rootFile)
+
+	for _, f := range idToFile {
+		// Because files in Google Drive may have multiple parent folders
+		// (which themselves may have multiple parents), each file may have
+		// multiple paths that refer to it.  To find them, we start from the
+		// file and walk up through all of its parents, recursively, prepending
+		// the parent folder's name to the in-progress path until we hit the
+		// root directory.  The path is then added to the paths array.
+		var paths []string
+		for _, parentId := range f.ParentIds {
+			getFilePath(f.Path, parentId, idToFile, &paths)
+		}
+		for _, p := range paths {
+			// Create a new File instance for each path where this file is
+			// found. (We don't want to clobber the Path member if there
+			// are multiple paths).  See the TODO above the File struct
+			// declaration for an issue with this approach, though.
+			file := new(File)
+			*file = *f
+			file.Path = p
+
+			gd.pathToFile[p] = append(gd.pathToFile[p], file)
+
+			dir := filepath.Dir(p)
+			gd.dirToFiles[dir] = append(gd.dirToFiles[dir], file)
+		}
+	}
+
+	return nil
+}
+
+// Google Drive associates a unique string id with each file and folder.
+// Updates in the changes stream are all in terms of (file id, change).
+// Therefore, we serialize the mapping id->gdrive.File to disk and update
+// this mapping with updates from Drive.  Only once it is up-to-date do we
+// convert this representation to one that is more useful to the operations
+// that the gdrive package provides.
+func (gd *GDrive) getIdToFile(filename string) (map[string]*File, error) {
 	maxChangeId := int64(-1)
 
 	// Channel to carry change records from Drive.  Make sure that a decent
@@ -512,12 +569,6 @@ func (gd *GDrive) UpdateMetadataCache(filename string) error {
 	// changes from Drive may block.)
 	changeChan := make(chan []*drive.Change, 32)
 
-	// Google Drive associates a unique string id with each file and
-	// folder.  Updates in the changes stream are all in terms of (file id,
-	// change).  Therefore, we serialize the mapping id->gdrive.File to
-	// disk and update this mapping with updates from Drive.  Only once it
-	// is up-to-date do we convert this representation to one that is more
-	// useful to the operations that the gdrive package provides.
 	idToFile := make(map[string]*File)
 
 	f, err := os.Open(filename)
@@ -582,53 +633,11 @@ func (gd *GDrive) UpdateMetadataCache(filename string) error {
 			newMaxChangeId)
 		err := gd.saveMetadataCache(filename, newMaxChangeId, idToFile)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	// Convert the idToFile map to one map from parent folder path to array
-	// of Files in the folder and to a second map from path to array of
-	// Files at that path.
-	gd.dirToFiles = make(map[string][]*File)
-	gd.pathToFile = make(map[string][]*File)
-
-	// TODO: store the root file metadata in the cache as well to avoid
-	// doing this each time.
-	rootDriveFile, err := gd.getFileById("root")
-	if err != nil {
-		return err
-	}
-	rootFile := newFile(".", rootDriveFile)
-	gd.pathToFile[rootFile.Path] = append(gd.pathToFile[rootFile.Path], rootFile)
-
-	for _, f := range idToFile {
-		// Because files in Google Drive may have multiple parent folders
-		// (which themselves may have multiple parents), each file may have
-		// multiple paths that refer to it.  To find them, we start from the
-		// file and walk up through all of its parents, recursively, prepending
-		// the parent folder's name to the in-progress path until we hit the
-		// root directory.  The path is then added to the paths array.
-		var paths []string
-		for _, parentId := range f.ParentIds {
-			getFilePath(f.Path, parentId, idToFile, &paths)
-		}
-		for _, p := range paths {
-			// Create a new File instance for each path where this file is
-			// found. (We don't want to clobber the Path member if there
-			// are multiple paths).  See the TODO above the File struct
-			// declaration for an issue with this approach, though.
-			file := new(File)
-			*file = *f
-			file.Path = p
-
-			gd.pathToFile[p] = append(gd.pathToFile[p], file)
-
-			dir := filepath.Dir(p)
-			gd.dirToFiles[dir] = append(gd.dirToFiles[dir], file)
-		}
-	}
-
-	return nil
+	return idToFile, nil
 }
 
 func getFilePath(path string, parentId string, idToFile map[string]*File, paths *[]string) {
@@ -641,6 +650,93 @@ func getFilePath(path string, parentId string, idToFile map[string]*File, paths 
 		// We're at the root, which doesn't have a parent.
 		*paths = append(*paths, path)
 	}
+}
+
+// CheckMetadata downloads the metadata about all of the files currently
+// stored on Drive and compares it with the local cache.
+func (gd *GDrive) CheckMetadata(filename string, report func(string)) error {
+	idToFile, err := gd.getIdToFile(filename)
+	if err != nil {
+		return err
+	}
+
+	// This will almost certainly take a while, so put up a progress bar.
+	bar := pb.New(len(idToFile))
+	bar.ShowBar = true
+	bar.ShowCounters = false
+	bar.Output = os.Stderr
+	bar.Prefix("Checking metadata cache: ")
+	bar.Start()
+
+	err = gd.runQuery("trashed=false", func(f *drive.File) {
+		if file, ok := idToFile[f.Id]; ok {
+			df := newFile(f.Title, f)
+			if !filesEqual(df, file) {
+				report(fmt.Sprintf("%s: metadata mismatch.\nLocal: %+v\nDrive: %+v",
+					file.Path, file, df))
+			}
+			bar.Increment()
+			delete(idToFile, f.Id)
+		} else {
+			// It'd be preferable to have "sharedWithMe=false" included in
+			// the query string above, but the combination of that with
+			// "trashed=false" seems to lead to no results being returned.
+			if f.Shared == false {
+				report(fmt.Sprintf("%s: found on Drive, not in local cache [%+v]",
+					f.Title, f))
+			}
+		}
+	})
+
+	for _, f := range idToFile {
+		report(fmt.Sprintf("%s: found in local cache, not on Drive [%+v]",
+			f.Path, f))
+	}
+
+	bar.Finish()
+	return nil
+}
+
+func filesEqual(fa, fb *File) bool {
+	if fa.Path != fb.Path || fa.FileSize != fb.FileSize ||
+		fa.Md5 != fb.Md5 || fa.MimeType != fb.MimeType ||
+		fa.ModTime != fb.ModTime {
+		return false
+	}
+
+	if len(fa.ParentIds) != len(fb.ParentIds) {
+		return false
+	}
+	for _, id := range fa.ParentIds {
+		found := false
+		for _, id2 := range fb.ParentIds {
+			if id == id2 {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+
+	if len(fa.Properties) != len(fb.Properties) {
+		return false
+	}
+	for _, p := range fa.Properties {
+		found := false
+		for _, p2 := range fb.Properties {
+			if p == p2 {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+
+	return true
 }
 
 // GetFile returns the File corresponding to a file or folder specified by

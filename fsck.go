@@ -26,7 +26,7 @@ import (
 	"strings"
 )
 
-func fsck(args []string) int {
+func fsck(args []string, metadataCacheFilename string) int {
 	path := ""
 	actuallyTrash := false
 	for i := 0; i < len(args); i++ {
@@ -79,6 +79,12 @@ mistake, it should be possible to salvage the file from the trash.
 	for _, files := range dupes {
 		errs += cleanupDupes(files, actuallyTrash)
 	}
+
+	// See if the metadata cache is in sync.
+	gd.CheckMetadata(metadataCacheFilename, func(msg string) {
+		fmt.Fprintf(os.Stderr, "skicka: %s\n", msg)
+		errs++
+	})
 
 	return errs
 }

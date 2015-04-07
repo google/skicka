@@ -827,7 +827,7 @@ func main() {
 	case "du":
 		errs = du(args)
 	case "fsck-experimental":
-		errs = fsck(args)
+		errs = fsck(args, *metadataCacheFilename)
 	case "ls":
 		errs = ls(args)
 	case "mkdir":
