@@ -70,6 +70,7 @@ software.  Bug reports are welcome.
      `~/.skicka.config` file.
 5. Try it out: run `skicka ls -l /`. A list of the files and folders
    in the root directory of your Google Drive should be printed.
+6. Join the [mailing list](https://groups.google.com/forum/#!forum/skicka-users)!
 
 ##Usage
 
@@ -157,7 +158,7 @@ directories in the path should be created).
 % skicka mkdir /Pictures/2015
 ```
 
-Finally, the amount of space used by the children of a given Google
+The amount of space used by the children of a given Google
 Drive folder can be reported by `du`:
 
 ```
@@ -167,6 +168,21 @@ Drive folder can be reported by `du`:
 121.02 MiB  /Pictures/2014
 294.72 MiB  /Pictures
 ```
+
+You can remove a file with `rm`; by default, files are moved to the Trash
+in Google Drive:
+
+```
+% skicka rm /Pictures/2014/embarassing.jpg
+```
+
+If you'd like to delete the file immediately with no chance to recover it,
+use the `-s` command-line option to `rm`.  To remove a folder and
+everything inside it, use `-r`.
+
+Finally, there is a `fsck` command that checks the file system on Google
+Drive for problems and verifies that the local cache of file metadata is
+in-sync with the files stored on Drive.
 
 ##FAQs
 
