@@ -156,6 +156,9 @@ func (gd *GDrive) getResumableUploadURI(f *drive.File, contentType string,
 	for try := 0; ; try++ {
 		gd.debug("Trying to get session URI")
 		resp, err := gd.oAuthTransport.RoundTrip(req)
+		if resp != nil && resp.Body != nil {
+			defer resp.Body.Close()
+		}
 
 		if err == nil && resp != nil && resp.StatusCode == 200 {
 			uri := resp.Header["Location"][0]
