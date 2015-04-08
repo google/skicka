@@ -785,6 +785,16 @@ func main() {
 	}
 
 	transport := http.DefaultTransport
+	if tr, ok := transport.(*http.Transport); ok {
+		// Increase the default number of open connections per destination host
+		// to be enough for the number of goroutines we run concurrently for
+		// uploads/downloads; this gives some benefit especially for uploading
+		// small files.
+		tr.MaxIdleConnsPerHost = 4
+	} else {
+		printErrorAndExit(fmt.Errorf("DefaultTransport not an *http.Transport?"))
+	}
+
 	if *flakyHTTP {
 		transport = newFlakyTransport(transport)
 	}
