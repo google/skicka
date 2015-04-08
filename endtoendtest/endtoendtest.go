@@ -27,6 +27,7 @@ package main
 
 import (
 	crand "crypto/rand"
+	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -41,6 +42,7 @@ import (
 )
 
 var encrypt bool
+var skicka string
 
 func main() {
 	encrypt = os.Getenv("SKICKA_PASSPHRASE") != ""
@@ -48,10 +50,24 @@ func main() {
 		log.Printf("Found SKICKA_PASSPHRASE; testing with encryption")
 	}
 
-	// TODO: make it possible to set the seed from the command-line.
-	seed := int64(os.Getpid())
+	seed := flag.Int("seed", 0, "RNG seed")
+	debug := flag.Bool("debug", false, "Pass -debug to skicka")
+	flaky := flag.Bool("flaky-http", false, "Pass -flaky-http to skicka")
+	flag.Parse()
+
+	if *seed == 0 {
+		*seed = os.Getpid()
+	}
 	log.Printf("Seed = %d", seed)
-	rand.Seed(seed)
+	rand.Seed(int64(*seed))
+
+	skicka = "skicka"
+	if *debug {
+		skicka += " -debug"
+	}
+	if *flaky {
+		skicka += " -flaky-http"
+	}
 
 	prepDrive()
 	miscTest()
@@ -180,34 +196,34 @@ func checkMatch(expected, output string) {
 
 func miscTest() {
 	// Create the /skicka_test directory and a few sub directories
-	runExpectSuccess("", "skicka mkdir", modPath(driveDir))
-	runExpectSuccess("", "skicka mkdir", modPath(filepath.Join(driveDir, "a")))
+	runExpectSuccess("", skicka+" mkdir", modPath(driveDir))
+	runExpectSuccess("", skicka+" mkdir", modPath(filepath.Join(driveDir, "a")))
 	runExpectFailure("/b: no such directory",
-		"skicka mkdir", modPath(filepath.Join(driveDir, "b", "c")))
-	runExpectSuccess("", "skicka mkdir -p", modPath(filepath.Join(driveDir, "b")))
+		skicka+" mkdir", modPath(filepath.Join(driveDir, "b", "c")))
+	runExpectSuccess("", skicka+" mkdir -p", modPath(filepath.Join(driveDir, "b")))
 	runExpectFailure("NOPE: no such directory",
-		"skicka mkdir ", modPath(filepath.Join(driveDir, "NOPE", "b")))
+		skicka+" mkdir ", modPath(filepath.Join(driveDir, "NOPE", "b")))
 
 	// Make sure that du reports that it's empty
 	runExpectSuccess(" 0 B    "+driveDir,
-		"skicka du "+driveDir)
+		skicka+" du "+driveDir)
 
 	// cat'ing a directory should fail
-	runExpectFailure("/b: is a directory", "skicka cat",
+	runExpectFailure("/b: is a directory", skicka+" cat",
 		modPath(filepath.Join(driveDir, "b")))
 
 	// ls some stuff in the directory
-	runExpectSuccess("^a/$", "skicka ls", driveDir)
-	runExpectSuccess("^b/$", "skicka ls", driveDir)
-	runExpectSuccess("^drwxr\\-xr\\-x.*a/", "skicka ls -l", driveDir)
-	runExpectSuccess("^drwxr\\-xr\\-x.*b/", "skicka ls -l", driveDir)
-	runExpectSuccess("^drwxr\\-xr\\-x.*skicka_test/a/", "skicka ls -l -r", driveDir)
+	runExpectSuccess("^a/$", skicka+" ls", driveDir)
+	runExpectSuccess("^b/$", skicka+" ls", driveDir)
+	runExpectSuccess("^drwxr\\-xr\\-x.*a/", skicka+" ls -l", driveDir)
+	runExpectSuccess("^drwxr\\-xr\\-x.*b/", skicka+" ls -l", driveDir)
+	runExpectSuccess("^drwxr\\-xr\\-x.*skicka_test/a/", skicka+" ls -l -r", driveDir)
 
 	// fsck should come up clean
-	// runExpectSuccess("", "skicka fsck-experimental "+driveDir)
+	// runExpectSuccess("", skicka+" fsck-experimental "+driveDir)
 
-	runExpectSuccess("", "skicka du /")
-	runExpectSuccess("", "skicka du .")
+	runExpectSuccess("", skicka+" du /")
+	runExpectSuccess("", skicka+" du .")
 
 	// upload a small file
 	f, err := ioutil.TempFile("", "skicka-endtoend")
@@ -219,31 +235,31 @@ func miscTest() {
 		log.Fatalf("%s", err)
 	}
 	f.Close()
-	runExpectSuccess("", "skicka upload", f.Name(), filepath.Join(driveDir, "upz.txt"))
+	runExpectSuccess("", skicka+" upload", f.Name(), filepath.Join(driveDir, "upz.txt"))
 
 	// cat its contents and make sure we get the right stuff back
-	runExpectSuccess("^foobar$", "skicka cat", filepath.Join(driveDir, "upz.txt"))
+	runExpectSuccess("^foobar$", skicka+" cat", filepath.Join(driveDir, "upz.txt"))
 
 	f, err = ioutil.TempFile("", "skicka-endtoend")
 	if err != nil {
 		log.Fatalf("%s", err)
 	}
 	f.Close()
-	runExpectSuccess("", "skicka download", filepath.Join(driveDir, "upz.txt"), f.Name())
+	runExpectSuccess("", skicka+" download", filepath.Join(driveDir, "upz.txt"), f.Name())
 	contents, err := ioutil.ReadFile(f.Name())
 	if string(contents) != "foobar" {
 		log.Fatalf("%s: file contents don't match \"foobar\"", f.Name())
 	}
 
 	// some ls tests of the uploaded file
-	runExpectSuccess("^upz.txt$", "skicka ls", filepath.Join(driveDir, "upz.txt"))
-	runExpectSuccess("^\\-rw\\-\\-\\-\\-\\-\\-\\- .*upz.txt$", "skicka ls -l",
+	runExpectSuccess("^upz.txt$", skicka+" ls", filepath.Join(driveDir, "upz.txt"))
+	runExpectSuccess("^\\-rw\\-\\-\\-\\-\\-\\-\\- .*upz.txt$", skicka+" ls -l",
 		filepath.Join(driveDir, "upz.txt"))
 
 	// wrap up by removing this and that
-	runExpectFailure(": is a folder", "skicka rm", modPath(driveDir))
-	runExpectSuccess("^$", "skicka rm", filepath.Join(driveDir, "upz.txt"))
-	runExpectFailure(": file not found", "skicka rm", filepath.Join(driveDir, "upz.txt"))
+	runExpectFailure(": is a folder", skicka+" rm", modPath(driveDir))
+	runExpectSuccess("^$", skicka+" rm", filepath.Join(driveDir, "upz.txt"))
+	runExpectFailure(": file not found", skicka+" rm", filepath.Join(driveDir, "upz.txt"))
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -425,15 +441,14 @@ func update(dir string) error {
 func upload(dir string) error {
 	log.Printf("Starting upload")
 	if encrypt {
-		return runCommand("skicka upload -encrypt", dir, modPath(driveDir))
-	} else {
-		return runCommand("skicka upload", dir, modPath(driveDir))
+		return runCommand(skicka+" upload -encrypt", dir, modPath(driveDir))
 	}
+	return runCommand(skicka+" upload", dir, modPath(driveDir))
 }
 
 func download(dir string) error {
 	log.Printf("Starting download")
-	return runCommand("skicka download", modPath(driveDir), dir)
+	return runCommand(skicka+" download", modPath(driveDir), dir)
 }
 
 func compare(patha, pathb string) error {
