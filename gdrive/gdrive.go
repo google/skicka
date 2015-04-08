@@ -393,7 +393,6 @@ func (gd *GDrive) getMetadataChanges(svc *drive.Service, maxChangeId int64,
 			"items/file/id", "items/file/parents", "items/file/title",
 			"items/file/fileSize", "items/file/mimeType", "items/file/properties",
 			"items/file/modifiedDate", "items/file/md5Checksum", "items/file/labels"}
-
 		q := svc.Changes.List().MaxResults(1000).IncludeSubscribed(false).Fields(fields...)
 		if maxChangeId >= 0 {
 			q = q.StartChangeId(maxChangeId + 1)
@@ -523,6 +522,7 @@ func (gd *GDrive) UpdateMetadataCache(filename string) error {
 	}
 	rootFile := newFile(".", rootDriveFile)
 	gd.pathToFile[rootFile.Path] = append(gd.pathToFile[rootFile.Path], rootFile)
+	idToFile[rootDriveFile.Id] = rootFile
 
 	for _, f := range idToFile {
 		// Because files in Google Drive may have multiple parent folders
@@ -642,14 +642,20 @@ func (gd *GDrive) getIdToFile(filename string) (map[string]*File, error) {
 
 func getFilePath(path string, parentId string, idToFile map[string]*File, paths *[]string) {
 	if parentFile, ok := idToFile[parentId]; ok {
-		for _, grandParentId := range parentFile.ParentIds {
-			newPath := filepath.Join(parentFile.Path, path)
-			getFilePath(newPath, grandParentId, idToFile, paths)
+		if len(parentFile.ParentIds) == 0 {
+			// We're at the root, which doesn't have any parents.
+			*paths = append(*paths, path)
+		} else {
+			for _, grandParentId := range parentFile.ParentIds {
+				newPath := filepath.Join(parentFile.Path, path)
+				getFilePath(newPath, grandParentId, idToFile, paths)
+			}
 		}
-	} else {
-		// We're at the root, which doesn't have a parent.
-		*paths = append(*paths, path)
 	}
+	// If one of the parent files doesn't exist in idToFile, then this
+	// means that it has been deleted or trashed. The current file came
+	// along for the ride, so just return without appending it to the paths
+	// array.
 }
 
 // CheckMetadata downloads the metadata about all of the files currently
