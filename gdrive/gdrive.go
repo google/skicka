@@ -1033,10 +1033,8 @@ func (gd *GDrive) createFileOrFolder(name string, parent *File,
 	// Update the pathToFile map.
 	switch len(gd.pathToFile[file.Path]) {
 	case 0:
-		gd.debug("%s: doesn't exist in pathToFile", file.Path)
 		gd.pathToFile[file.Path] = append(gd.pathToFile[file.Path], file)
 	case 1:
-		gd.debug("%s: already exist in pathToFile", file.Path)
 		gd.pathToFile[file.Path][0] = file
 	default:
 		panic("gdrive: creating file/folder when multiple already exist")
@@ -1047,13 +1045,11 @@ func (gd *GDrive) createFileOrFolder(name string, parent *File,
 	// this one.
 	for i, dirFile := range gd.dirToFiles[parent.Path] {
 		if dirFile.Path == file.Path {
-			gd.debug("%s: already exists in dirToFiles", file.Path)
 			gd.dirToFiles[parent.Path][i] = file
 			return file, nil
 		}
 	}
 
-	gd.debug("%s: doesn't exist in dirToFiles", file.Path)
 	gd.dirToFiles[parent.Path] = append(gd.dirToFiles[parent.Path], file)
 	return file, nil
 }
