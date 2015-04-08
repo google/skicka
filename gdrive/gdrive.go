@@ -475,11 +475,37 @@ func (gd *GDrive) saveMetadataCache(filename string, maxChangeId int64,
 	if err := f.Close(); err != nil {
 		return err
 	}
-	// And now rename the temporary file to the actual cache filename; this
+	// Try to rename the temporary file to the actual cache filename; this
 	// ensures that we have an atomic update and don't inadvertently write
 	// out a truncated file if there's an error.
 	if err = os.Rename(f.Name(), filename); err != nil {
-		return err
+		// The rename may fail, for example if the two files are on
+		// different filesystems.
+		gd.debug("%s -> %s: rename failed. Trying manual copy.", f.Name(), filename)
+
+		ftmp, err := os.Open(f.Name())
+		if err != nil {
+			return err
+		}
+		defer ftmp.Close()
+
+		// Try making a temporary file in the same directory as the
+		// eventual destination file.
+		flocal, err := ioutil.TempFile(filepath.Dir(filename), ".skicka.metadata")
+		if err != nil {
+			return err
+		}
+		// This remove will return an error if the Rename() below
+		// succeeds. That's fine.
+		defer os.Remove(flocal.Name())
+
+		if _, err := io.Copy(flocal, ftmp); err != nil {
+			flocal.Close()
+			return err
+		} else if err := flocal.Close(); err != nil {
+			return err
+		}
+		err = os.Rename(flocal.Name(), filename)
 	}
 
 	gd.debug("Done writing new file cache to disk %s", time.Now().String())
