@@ -18,7 +18,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"net/http"
@@ -82,8 +84,12 @@ func (ft flakyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		codes := []int{401, 403, 404, 408, 500, 503}
 		c := codes[int(ft.rng.Int31())%len(codes)]
 		debug.Printf("Dropping http request %+v -> %c", req, c)
-		return &http.Response{Status: fmt.Sprintf("%d Flaky Error", c), StatusCode: c,
-			Request: req}, nil
+		return &http.Response{
+				Body:       ioutil.NopCloser(bytes.NewReader([]byte("flaky error body"))),
+				Status:     fmt.Sprintf("%d Flaky Error", c),
+				StatusCode: c,
+				Request:    req},
+			nil
 	}
 	debug.Printf("Returning error from http request %+v", req)
 	return nil, fmt.Errorf("flaky http error")
