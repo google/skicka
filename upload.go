@@ -298,7 +298,7 @@ func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTime
 				// Errors creating directories are basically unrecoverable,
 				// as they'll prevent us from later uploading any files in
 				// them.
-				printErrorAndExit(fmt.Errorf("%s: %v", file.LocalPath, err))
+				printErrorAndExit(err)
 			}
 			updateActiveMemory()
 		}
@@ -337,7 +337,7 @@ func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTime
 		if err := syncFileUp(fm.LocalPath, fm.LocalFileInfo, fm.DrivePath, encrypt,
 			fileProgressBar); err != nil {
 			nUploadErrors++
-			fmt.Fprintf(os.Stderr, "\nskicka: %s: %v\n", fm.LocalPath, err)
+			fmt.Fprintf(os.Stderr, "\nskicka: %v\n", err)
 		}
 		updateActiveMemory()
 	}
