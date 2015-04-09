@@ -80,10 +80,11 @@ func (ft flakyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		debug.Printf("Flaky http for %s", delta.String())
 	}
 
+	reqstr := sanitize(fmt.Sprintf("%+v", req))
 	if (ft.rng.Int() % 2) == 0 {
 		codes := []int{401, 403, 404, 408, 500, 503}
 		c := codes[int(ft.rng.Int31())%len(codes)]
-		debug.Printf("Dropping http request %+v -> %c", req, c)
+		debug.Printf("Dropping http request %s -> %d", reqstr, c)
 		return &http.Response{
 				Body:       ioutil.NopCloser(bytes.NewReader([]byte("flaky error body"))),
 				Status:     fmt.Sprintf("%d Flaky Error", c),
@@ -91,6 +92,6 @@ func (ft flakyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 				Request:    req},
 			nil
 	}
-	debug.Printf("Returning error from http request %+v", req)
+	debug.Printf("Returning error from http request %s", reqstr)
 	return nil, fmt.Errorf("flaky http error")
 }
