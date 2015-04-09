@@ -171,6 +171,7 @@ func lsFile(f *gdrive.File, recursive, long, longlong bool) {
 			for _, prop := range f.Properties {
 				fmt.Printf("%s: %s, ", prop.Key, prop.Value)
 			}
+			fmt.Printf("MimeType: %s, ", f.MimeType)
 			fmt.Printf("id: %s ]\n", f.Id)
 		}
 	} else {
