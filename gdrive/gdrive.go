@@ -511,7 +511,9 @@ func (gd *GDrive) saveMetadataCache(filename string, maxChangeId int64,
 		} else if err := flocal.Close(); err != nil {
 			return err
 		}
-		err = os.Rename(flocal.Name(), filename)
+		if err := os.Rename(flocal.Name(), filename); err != nil {
+			return err
+		}
 	}
 
 	gd.debug("Done writing new file cache to disk %s", time.Now().String())
