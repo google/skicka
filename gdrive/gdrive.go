@@ -700,9 +700,9 @@ func getFilePath(path string, parentId string, idToFile map[string]*File, paths 
 		}
 	}
 	// If one of the parent files doesn't exist in idToFile, then this
-	// means that it has been deleted or trashed. The current file came
-	// along for the ride, so just return without appending it to the paths
-	// array.
+	// means that it has been deleted or trashed. In that case, the current
+	// file is also deleted/trashed and so we just return without appending
+	// it to the paths array.
 }
 
 // CheckMetadata downloads the metadata about all of the files currently
