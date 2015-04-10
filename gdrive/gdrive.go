@@ -254,31 +254,30 @@ func (gd *GDrive) getFileById(id string) (*drive.File, error) {
 // conditions.
 func (gd *GDrive) runQuery(query string, process func(*drive.File)) error {
 	gd.debug("Running query: %s", query)
+
 	pageToken := ""
-	for {
+	for try := 0; ; try++ {
 		q := gd.svc.Files.List().Q(query)
 		if pageToken != "" {
 			q = q.PageToken(pageToken)
 		}
 
-		for try := 0; ; try++ {
-			r, err := q.Do()
-			if err == nil {
-				for _, f := range r.Items {
-					process(f)
-				}
-				pageToken = r.NextPageToken
-				break
-			} else if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
+		r, err := q.Do()
+		if err != nil {
+			if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
 				return err
 			}
-		}
+		} else {
+			for _, f := range r.Items {
+				process(f)
+			}
 
-		if pageToken == "" {
-			break
+			pageToken = r.NextPageToken
+			if pageToken == "" {
+				return nil
+			}
 		}
 	}
-	return nil
 }
 
 ///////////////////////////////////////////////////////////////////////////
