@@ -617,9 +617,8 @@ func (gd *GDrive) getIdToFile(filename string) (map[string]*File, error) {
 			return nil, err
 		}
 		if version != 1 {
-			fmt.Fprintf(os.Stderr, "skicka: metadata file version %d unknown to "+
-				"this version of skicka", version)
-			os.Exit(1)
+			return nil, fmt.Errorf("metadata file version %d unknown to this version"+
+				"of skicka", version)
 		}
 
 		if err := decoder.Decode(&maxChangeId); err != nil {
