@@ -691,6 +691,10 @@ func getFilePath(path string, parentId string, idToFile map[string]*File, paths 
 	if parentFile, ok := idToFile[parentId]; ok {
 		if len(parentFile.ParentIds) == 0 {
 			// We're at the root, which doesn't have any parents.
+			// Double-check, though.
+			if parentFile.Path != "." {
+				panic("no parents, but path isn't \".\"?")
+			}
 			*paths = append(*paths, path)
 		} else {
 			for _, grandParentId := range parentFile.ParentIds {
