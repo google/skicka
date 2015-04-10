@@ -187,17 +187,7 @@ func syncHierarchyDown(driveBasePath string, localBasePath string, trustTimes bo
 		} else {
 			// No download needed, but make sure the local permissions and
 			// modified time match those values on Drive.
-			mode, err := getPermissions(f)
-			if err != nil {
-				mode = 0644
-			}
-			err = os.Chmod(localPath, mode)
-			if err == nil {
-				err = os.Chtimes(localPath, f.ModTime, f.ModTime)
-			}
-			if err != nil {
-				addErrorAndPrintMessage(&nDownloadErrors, localPath, err)
-			}
+			syncLocalFileMetadata(localPath, f, &nDownloadErrors)
 		}
 	}
 
@@ -260,6 +250,20 @@ func syncHierarchyDown(driveBasePath string, localBasePath string, trustTimes bo
 			nDownloadErrors)
 	}
 	return int(nDownloadErrors)
+}
+
+func syncLocalFileMetadata(localPath string, f *gdrive.File, nDownloadErrors *int32) {
+	mode, err := getPermissions(f)
+	if err != nil {
+		mode = 0644
+	}
+	if err := os.Chmod(localPath, mode); err != nil {
+		addErrorAndPrintMessage(nDownloadErrors, localPath, err)
+	}
+
+	if err := os.Chtimes(localPath, f.ModTime, f.ModTime); err != nil {
+		addErrorAndPrintMessage(nDownloadErrors, localPath, err)
+	}
 }
 
 // Create a map, indexed by Google Drive file Id, that gives the local
