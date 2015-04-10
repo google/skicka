@@ -454,6 +454,7 @@ func (gd *GDrive) saveMetadataCache(filename string, maxChangeId int64,
 	if err != nil {
 		return err
 	}
+	defer os.Remove(f.Name())
 
 	e := gob.NewEncoder(f)
 
