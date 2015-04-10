@@ -346,7 +346,7 @@ func New(clientId, clientSecret, cacheFile string,
 	return gd, nil
 }
 
-func (gd *GDrive) getMetadataChanges(svc *drive.Service, maxChangeId int64,
+func (gd *GDrive) getMetadataChanges(svc *drive.Service, startChangeId int64,
 	changeChan chan<- []*drive.Change, errorChan chan<- error) {
 	var about *drive.About
 	var err error
@@ -372,8 +372,9 @@ func (gd *GDrive) getMetadataChanges(svc *drive.Service, maxChangeId int64,
 	// we're not done after a few seconds?  It's not clear if this is worth
 	// the trouble.
 	var bar *pb.ProgressBar
-	if about.LargestChangeId-maxChangeId > 1000 {
-		bar = pb.New64(about.LargestChangeId)
+	numChanges := about.LargestChangeId - startChangeId
+	if numChanges > 1000 {
+		bar = pb.New64(numChanges)
 		bar.ShowBar = true
 		bar.ShowCounters = false
 		bar.Output = os.Stderr
@@ -393,8 +394,8 @@ func (gd *GDrive) getMetadataChanges(svc *drive.Service, maxChangeId int64,
 			"items/file/fileSize", "items/file/mimeType", "items/file/properties",
 			"items/file/modifiedDate", "items/file/md5Checksum", "items/file/labels"}
 		q := svc.Changes.List().MaxResults(1000).IncludeSubscribed(false).Fields(fields...)
-		if maxChangeId >= 0 {
-			q = q.StartChangeId(maxChangeId + 1)
+		if startChangeId >= 0 {
+			q = q.StartChangeId(startChangeId + 1)
 		}
 		if pageToken != "" {
 			q = q.PageToken(pageToken)
@@ -409,9 +410,11 @@ func (gd *GDrive) getMetadataChanges(svc *drive.Service, maxChangeId int64,
 			}
 			try++
 			continue
-		} else {
-			try = 0
 		}
+
+		// Success. Reset the try counter in case we had errors leading up
+		// to this.
+		try = 0
 
 		if len(r.Items) > 0 {
 			// Send the changes along to the goroutine that's updating the
@@ -419,7 +422,7 @@ func (gd *GDrive) getMetadataChanges(svc *drive.Service, maxChangeId int64,
 			changeChan <- r.Items
 
 			if bar != nil {
-				bar.Set(int(r.Items[len(r.Items)-1].Id))
+				bar.Set(int(r.Items[len(r.Items)-1].Id - startChangeId))
 			}
 		}
 
