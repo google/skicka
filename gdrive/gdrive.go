@@ -347,7 +347,7 @@ func New(clientId, clientSecret, cacheFile string,
 }
 
 func (gd *GDrive) getMetadataChanges(svc *drive.Service, maxChangeId int64,
-	changeChan chan []*drive.Change) {
+	changeChan chan<- []*drive.Change, errorChan chan<- error) {
 	var about *drive.About
 	var err error
 
@@ -361,16 +361,16 @@ func (gd *GDrive) getMetadataChanges(svc *drive.Service, maxChangeId int64,
 			err = gd.tryToHandleDriveAPIError(err, try)
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "skicka: %s\n", err)
-			os.Exit(1)
+			errorChan <- err
+			return
 		}
 	}
 
 	// Don't clutter the output with a progress bar unless it looks like
 	// downloading changes may take a while.
-	// TODO: consider using sync.After to put up the progress bar if we're
-	// not done after a few seconds?  It's not clear if this is worth the
-	// trouble.
+	// TODO: consider using timer.AfterFunc to put up the progress bar if
+	// we're not done after a few seconds?  It's not clear if this is worth
+	// the trouble.
 	var bar *pb.ProgressBar
 	if about.LargestChangeId-maxChangeId > 1000 {
 		bar = pb.New64(about.LargestChangeId)
@@ -404,8 +404,8 @@ func (gd *GDrive) getMetadataChanges(svc *drive.Service, maxChangeId int64,
 		if err != nil {
 			err = gd.tryToHandleDriveAPIError(err, try)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "skicka: %s\n", err)
-				os.Exit(1)
+				errorChan <- err
+				return
 			}
 			try++
 			continue
@@ -429,6 +429,9 @@ func (gd *GDrive) getMetadataChanges(svc *drive.Service, maxChangeId int64,
 		}
 	}
 	// Signal that no more changes are coming.
+	// TODO: should actually close() the channel and then wait for the
+	// close on the other end. (This applies most other places chans are
+	// used in skicka.)
 	changeChan <- []*drive.Change{}
 
 	if bar != nil {
@@ -593,6 +596,7 @@ func (gd *GDrive) getIdToFile(filename string) (map[string]*File, error) {
 	// metadata from disk takes a while.  (Otherwise, the goroutine getting
 	// changes from Drive may block.)
 	changeChan := make(chan []*drive.Change, 32)
+	errorChan := make(chan error)
 
 	idToFile := make(map[string]*File)
 
@@ -617,38 +621,45 @@ func (gd *GDrive) getIdToFile(filename string) (map[string]*File, error) {
 		// file, we can kick off the goroutine that starts pulling changes
 		// from Google Drive.  This can happen concurrently with reading
 		// the cache from disk.
-		go gd.getMetadataChanges(gd.svc, maxChangeId, changeChan)
+		go gd.getMetadataChanges(gd.svc, maxChangeId, changeChan, errorChan)
 
 		// Read the rest of the metadata.
 		decoder.Decode(&idToFile)
 		gd.debug("Done reading file cache from disk @ %s\n", time.Now().String())
 	} else {
 		// No metadata available locally; pull the entire history from Drive.
-		go gd.getMetadataChanges(gd.svc, maxChangeId, changeChan)
+		go gd.getMetadataChanges(gd.svc, maxChangeId, changeChan, errorChan)
 	}
 
 	// Only after the metadata has been read from disk can we start
 	// processing updates to it from Drive.
 	newMaxChangeId := maxChangeId
+outer:
 	for {
-		changes := <-changeChan
-		if len(changes) == 0 {
-			break
-		}
-
-		for _, c := range changes {
-			if c.Id < newMaxChangeId {
-				panic(fmt.Sprintf("Change id %d less than max %d!", c.Id, newMaxChangeId))
+		select {
+		case changes := <-changeChan:
+			if len(changes) == 0 {
+				break outer
 			}
-			newMaxChangeId = c.Id
 
-			if c.Deleted || (c.File != nil && c.File.Labels != nil && c.File.Labels.Trashed) {
-				delete(idToFile, c.FileId)
-			} else {
-				// For the files in the idToFile map, we overload File.Path
-				// to store the file's name for now.
-				idToFile[c.File.Id] = newFile(c.File.Title, c.File)
+			for _, c := range changes {
+				if c.Id < newMaxChangeId {
+					panic(fmt.Sprintf("Change id %d less than max %d!", c.Id,
+						newMaxChangeId))
+				}
+				newMaxChangeId = c.Id
+
+				if c.Deleted ||
+					(c.File != nil && c.File.Labels != nil && c.File.Labels.Trashed) {
+					delete(idToFile, c.FileId)
+				} else {
+					// For the files in the idToFile map, we overload File.Path
+					// to store the file's name for now.
+					idToFile[c.File.Id] = newFile(c.File.Title, c.File)
+				}
 			}
+		case err = <-errorChan:
+			return nil, err
 		}
 	}
 	gd.debug("File cache has %d items\n", len(idToFile))
