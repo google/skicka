@@ -613,14 +613,18 @@ func (gd *GDrive) getIdToFile(filename string) (map[string]*File, error) {
 		decoder := gob.NewDecoder(f)
 
 		var version int
-		decoder.Decode(&version)
+		if err := decoder.Decode(&version); err != nil {
+			return nil, err
+		}
 		if version != 1 {
 			fmt.Fprintf(os.Stderr, "skicka: metadata file version %d unknown to "+
 				"this version of skicka", version)
 			os.Exit(1)
 		}
 
-		decoder.Decode(&maxChangeId)
+		if err := decoder.Decode(&maxChangeId); err != nil {
+			return nil, err
+		}
 		gd.debug("Read max change id %d\n", maxChangeId)
 
 		// As soon as we know the id of the last change in the metadata
@@ -630,7 +634,9 @@ func (gd *GDrive) getIdToFile(filename string) (map[string]*File, error) {
 		go gd.getMetadataChanges(gd.svc, maxChangeId, changeChan, errorChan)
 
 		// Read the rest of the metadata.
-		decoder.Decode(&idToFile)
+		if err := decoder.Decode(&idToFile); err != nil {
+			return nil, err
+		}
 		gd.debug("Done reading file cache from disk @ %s\n", time.Now().String())
 	} else {
 		// No metadata available locally; pull the entire history from Drive.
