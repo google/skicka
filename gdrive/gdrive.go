@@ -810,6 +810,15 @@ func (gd *GDrive) GetFile(path string) (*File, error) {
 	return files[0], nil
 }
 
+// Given a path from the user, convert it into the form that's used for
+// paths in the dirToFiles and pathToFile maps in GDrive.  Specifically:
+// run it through filepath.Clean() to eliminate any clearly redundant junk,
+// convert "/" to ".", and remove any leading "/", if the user provided an
+// absolute path.
+//
+// TODO: could we equivalently just do:
+//   return filepath.Clean(filepath.Join(".", path))
+// ?
 func canonicalPath(path string) string {
 	path = filepath.Clean(path)
 	if path[0] == os.PathSeparator {
