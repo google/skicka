@@ -300,7 +300,6 @@ func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTime
 				// them.
 				printErrorAndExit(err)
 			}
-			updateActiveMemory()
 		}
 		dirProgressBar.Finish()
 	}
@@ -339,7 +338,6 @@ func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTime
 			nUploadErrors++
 			fmt.Fprintf(os.Stderr, "\nskicka: %v\n", err)
 		}
-		updateActiveMemory()
 	}
 
 	// Smaller files will be handled with multiple threads going at once;
@@ -399,7 +397,6 @@ func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTime
 				atomic.AddInt32(&nUploadErrors, 1)
 				fmt.Fprintf(os.Stderr, "\nskicka: %s: %v\n", fm.LocalPath, err)
 			}
-			updateActiveMemory()
 		}
 	}
 

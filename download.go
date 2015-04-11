@@ -322,7 +322,6 @@ func downloadFile(f *gdrive.File, localPath string, progressBar *pb.ProgressBar)
 	}
 
 	verbose.Printf("Downloaded and wrote %d bytes to %s", f.FileSize, localPath)
-	updateActiveMemory()
 
 	return os.Chtimes(localPath, f.ModTime, f.ModTime)
 }

@@ -805,6 +805,15 @@ func main() {
 		transport = addKeyTransport{transport: transport, key: config.Google.ApiKey}
 	}
 
+	// Update the current active memory statistics every half second.
+	ticker := time.NewTicker(500 * time.Millisecond)
+	go func() {
+		for {
+			<-ticker.C
+			updateActiveMemory()
+		}
+	}()
+
 	var err error
 	gd, err = gdrive.New(config.Google.ClientId, config.Google.ClientSecret,
 		*tokenCacheFilename, config.Upload.Bytes_per_second_limit,
