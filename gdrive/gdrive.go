@@ -432,10 +432,7 @@ func (gd *GDrive) getMetadataChanges(svc *drive.Service, startChangeId int64,
 		}
 	}
 	// Signal that no more changes are coming.
-	// TODO: should actually close() the channel and then wait for the
-	// close on the other end. (This applies most other places chans are
-	// used in skicka.)
-	changeChan <- []*drive.Change{}
+	close(changeChan)
 
 	if bar != nil {
 		bar.Finish()
@@ -648,8 +645,8 @@ func (gd *GDrive) getIdToFile(filename string) (map[string]*File, error) {
 outer:
 	for {
 		select {
-		case changes := <-changeChan:
-			if len(changes) == 0 {
+		case changes, ok := <-changeChan:
+			if !ok {
 				break outer
 			}
 
