@@ -212,18 +212,16 @@ func syncHierarchyDown(driveBasePath string, localBasePath string, trustTimes bo
 			for {
 				// Get the gdrive.File for the file the worker should download
 				// next.
-				f := <-toDownloadChan
-				if f == nil {
-					// An empty path is the signal for the worker to exit.
+				if f, ok := <-toDownloadChan; ok {
+					localPath := localPathMap[f.Path]
+					err := downloadFile(f, localPath, progressBar)
+					if err != nil {
+						addErrorAndPrintMessage(&nDownloadErrors, localPath, err)
+					}
+				} else {
 					debug.Printf("Worker exiting")
 					doneChan <- 1
 					break
-				}
-
-				localPath := localPathMap[f.Path]
-				err := downloadFile(f, localPath, progressBar)
-				if err != nil {
-					addErrorAndPrintMessage(&nDownloadErrors, localPath, err)
 				}
 			}
 		}()
@@ -233,11 +231,7 @@ func syncHierarchyDown(driveBasePath string, localBasePath string, trustTimes bo
 	for _, f := range filesToDownload {
 		toDownloadChan <- f
 	}
-
-	// Wrap up by sending "stop working" files.
-	for i := 0; i < nWorkers; i++ {
-		toDownloadChan <- nil
-	}
+	close(toDownloadChan)
 
 	// And now wait for the workers to all return.
 	for i := 0; i < nWorkers; i++ {
