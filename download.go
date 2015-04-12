@@ -202,8 +202,8 @@ func syncHierarchyDown(driveBasePath string, localBasePath string, trustTimes bo
 	// downloading file contents while others are still making Drive API
 	// calls this way.
 	nWorkers := 4
-	toDownloadChan := make(chan *gdrive.File)
-	doneChan := make(chan int)
+	toDownloadChan := make(chan *gdrive.File, 128)
+	doneChan := make(chan int, nWorkers)
 	progressBar := getProgressBar(nBytesToDownload)
 
 	// Launch the workers.
