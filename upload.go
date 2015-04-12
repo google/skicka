@@ -72,7 +72,22 @@ func upload(args []string) int {
 	}
 
 	f := gd.GetFiles(drivePath)
-	if len(f) > 1 {
+	switch len(f) {
+	case 0:
+		// It's fine if the target path doesn't exist, but its parent
+		// directory must be there.
+		p := filepath.Dir(drivePath)
+		switch len(gd.GetFiles(p)) {
+		case 0:
+			printErrorAndExit(fmt.Errorf("%s: not found", p))
+		case 1:
+			// LGTM.
+		default:
+			printErrorAndExit(fmt.Errorf("%s: multiple files exist", p))
+		}
+	case 1:
+		// LGTM.
+	default:
 		printErrorAndExit(fmt.Errorf("%s: multiple files exist", drivePath))
 	}
 
@@ -113,11 +128,8 @@ func syncFileUp(localPath string, stat os.FileInfo, drivePath string, encrypt bo
 	// This folder should definitely exist at this point, since we
 	// create all folders needed before starting to upload files.
 	parentFolder, err := gd.GetFile(filepath.Dir(drivePath))
-	if err == gdrive.ErrNotExist {
-		checkFatalError(err, fmt.Sprintf("%s: get parent directory",
-			filepath.Dir(drivePath)))
-	} else if err != nil {
-		return err
+	if err != nil {
+		panic(fmt.Sprintf("%s: get parent directory: %s", filepath.Dir(drivePath), err))
 	}
 
 	baseName := filepath.Base(drivePath)
