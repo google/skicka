@@ -137,14 +137,13 @@ func syncFileUp(localPath string, stat os.FileInfo, drivePath string, encrypt bo
 
 	if stat.IsDir() {
 		// We only get here if the folder doesn't exist at all on Drive; if
-		// it already exists, we update the metadata earlier and don't go
-		// through this path.
+		// it already exists, we updated the metadata earlier (in
+		// fileNeedsUpload) and don't go through this path.
 		var proplist []gdrive.Property
 		proplist = append(proplist, gdrive.Property{Key: "Permissions",
 			Value: fmt.Sprintf("%#o", stat.Mode()&os.ModePerm)})
 		driveFile, err = gd.CreateFolder(baseName, parentFolder, stat.ModTime(),
 			proplist)
-
 		checkFatalError(err, fmt.Sprintf("%s: create folder", drivePath))
 
 		pb.Increment()
@@ -152,11 +151,7 @@ func syncFileUp(localPath string, stat os.FileInfo, drivePath string, encrypt bo
 		verbose.Printf("Created Google Drive folder %s", drivePath)
 	} else {
 		// We're uploading a file.  Create an empty file on Google Drive if
-		// it doesn't already exist. We explicitly set the modification
-		// time of the file to the start of the Unix epoch, so that if the
-		// download fails partway through, then we won't later be confused
-		// about which file is the correct one from having local and Drive
-		// copies with the same time but different contents.
+		// it doesn't already exist.
 		if driveFile, err = gd.GetFile(drivePath); err == gdrive.ErrNotExist {
 			debug.Printf("%s doesn't exist on Drive. Creating", drivePath)
 			var proplist []gdrive.Property
@@ -168,6 +163,11 @@ func syncFileUp(localPath string, stat os.FileInfo, drivePath string, encrypt bo
 			}
 			proplist = append(proplist, gdrive.Property{Key: "Permissions",
 				Value: fmt.Sprintf("%#o", stat.Mode()&os.ModePerm)})
+			// We explicitly set the modification time of the file to the
+			// start of the Unix epoch, so that if the upload fails
+			// partway through, then we won't later be confused about which
+			// file is the correct one from having local and Drive copies
+			// with the same time but different contents.
 			driveFile, err = gd.CreateFile(baseName, parentFolder, time.Unix(0, 0),
 				proplist)
 
@@ -205,7 +205,7 @@ func uploadFileContents(localPath string, driveFile *gdrive.File, encrypt bool,
 		}
 	}
 
-	for ntries := 0; ; ntries++ {
+	for try := 0; ; try++ {
 		contentsReader, length, err :=
 			getFileContentsReaderForUpload(localPath, encrypt, iv)
 		if contentsReader != nil {
@@ -226,7 +226,7 @@ func uploadFileContents(localPath string, driveFile *gdrive.File, encrypt bool,
 		if length >= resumableUploadMinSize {
 			err = gd.UploadFileContentsResumable(driveFile, uploadReader, length)
 		} else {
-			err = gd.UploadFileContents(driveFile, uploadReader, length, ntries)
+			err = gd.UploadFileContents(driveFile, uploadReader, length, try)
 		}
 		atomic.AddInt64(&stats.DiskReadBytes, countingReader.bytesRead)
 
@@ -242,7 +242,7 @@ func uploadFileContents(localPath string, driveFile *gdrive.File, encrypt bool,
 		// 100% progress...
 		pb.Add64(-countingReader.bytesRead)
 
-		if re, ok := err.(gdrive.RetryHTTPTransmitError); ok && ntries < 5 {
+		if re, ok := err.(gdrive.RetryHTTPTransmitError); ok && try < 5 {
 			debug.Printf("%s: got retry http error--retrying: %s",
 				localPath, re.Error())
 		} else {
@@ -303,8 +303,8 @@ func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTime
 		// Sync each of the directories, which serves to create any missing ones.
 		for _, dirName := range directoryNames {
 			file := directoryMappingMap[dirName]
-			err := syncFileUp(file.LocalPath, file.LocalFileInfo, file.DrivePath, encrypt,
-				dirProgressBar)
+			err := syncFileUp(file.LocalPath, file.LocalFileInfo, file.DrivePath,
+				encrypt, dirProgressBar)
 			if err != nil {
 				// Errors creating directories are basically unrecoverable,
 				// as they'll prevent us from later uploading any files in
@@ -426,14 +426,14 @@ func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTime
 
 	if nUploadErrors > 0 {
 		fmt.Fprintf(os.Stderr, "skicka: %d files not uploaded due to errors. "+
-			"This is likely a transient failure; try uploading again", nUploadErrors)
+			"This is likely a transient failure; try uploading again.", nUploadErrors)
 	}
 	return int(nUploadErrors)
 }
 
 // Determine if the local file needs to be uploaded to Google Drive.
 // Starts with the efficient checks that may be able to let us quickly
-// determine one way or the other.
+// determine one way or the other before going to the more expensive ones.
 func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 	encrypt, trustTimes bool) (bool, error) {
 	// Don't upload if the filename matches one of the regular expressions
@@ -547,11 +547,11 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 	}
 
 	// Check if the saved MD5 on Drive is the same when it's recomputed locally
-	md5contents, err := localFileMD5Contents(localPath, encrypt, iv)
+	md5local, err := localFileMD5Contents(localPath, encrypt, iv)
 	if err != nil {
 		return false, err
 	}
-	if md5contents != driveFile.Md5 {
+	if md5local != driveFile.Md5 {
 		// The contents of the local file and the remote file differ.
 
 		if timeMatches {
@@ -574,7 +574,8 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 	}
 
 	// The timestamp of the local file is different, but the checksums
-	// match, so just update the modified time on Drive.
+	// match, so just update the modified time on Drive and don't upload
+	// the file contents.
 	debug.Printf("%s: updating modification time (#2) to %s", drivePath, stat.ModTime())
 	return false, gd.UpdateModificationTime(driveFile, stat.ModTime())
 }
