@@ -167,8 +167,7 @@ func syncFileUp(localPath string, stat os.FileInfo, drivePath string, encrypt bo
 		// And now upload the contents of the file, either overwriting the
 		// contents of the existing file, or adding contents to the
 		// just-created file.
-		err = uploadFileContents(localPath, driveFile, encrypt, pb)
-		if err != nil {
+		if err = uploadFileContents(localPath, driveFile, encrypt, pb); err != nil {
 			return err
 		}
 	}
@@ -349,7 +348,7 @@ func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTime
 	// Upload worker threads send a value over this channel when
 	// they're done; the code that launches them waits for all of them
 	// to do so before returning.
-	doneChan := make(chan int)
+	doneChan := make(chan int, nWorkers)
 
 	// Now that multiple threads are running, we need a mutex to protect
 	// access to uploadFrontIndex and uploadBackIndex.
@@ -486,6 +485,7 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 
 	// Go ahead and update the file's permissions if they've changed.
 	bitsString := fmt.Sprintf("%#o", stat.Mode()&os.ModePerm)
+	debug.Printf("%s: updating permissions to %s", drivePath, bitsString)
 	err = gd.UpdateProperty(driveFile, "Permissions", bitsString)
 	if err != nil {
 		return false, err
@@ -494,6 +494,7 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 	// If it's a directory, once it's created and the permissions and times
 	// are updated (if needed), we're all done.
 	if stat.IsDir() {
+		debug.Printf("%s: updating modification time to %s", drivePath, stat.ModTime())
 		return false, gd.UpdateModificationTime(driveFile, stat.ModTime())
 	}
 
@@ -562,6 +563,7 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 
 	// The timestamp of the local file is different, but the checksums
 	// match, so just update the modified time on Drive.
+	debug.Printf("%s: updating modification time (#2) to %s", drivePath, stat.ModTime())
 	return false, gd.UpdateModificationTime(driveFile, stat.ModTime())
 }
 
