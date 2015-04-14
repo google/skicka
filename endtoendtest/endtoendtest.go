@@ -20,13 +20,13 @@
 /*
 more things that need testing:
 - downloading Drive files/folders that weren't originally created by skicka
-- sometimes randomly interrupt the upload?
 */
 
 package main
 
 import (
 	crand "crypto/rand"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -53,6 +53,11 @@ func main() {
 	seed := flag.Int("seed", 0, "RNG seed")
 	debug := flag.Bool("debug", false, "Pass -debug to skicka")
 	flaky := flag.Bool("flaky-http", false, "Pass -flaky-http to skicka")
+	dumpHTTP := flag.Bool("dump-http", false, "Print HTTP traffic")
+	kill := flag.Bool("randomly-kill", false, "Randomly kill skicka uploads/downloads")
+	singleThread := flag.Bool("single-thread", false, "Use a single thread for uploads/downloads")
+	uploadDownloadOnly := flag.Bool("upload-download-only", false,
+		"Only do upload and download tests")
 	flag.Parse()
 
 	if *seed == 0 {
@@ -68,12 +73,19 @@ func main() {
 	if *flaky {
 		skicka += " -flaky-http"
 	}
+	if *dumpHTTP {
+		skicka += " -dump-http"
+	}
+	if *singleThread {
+		skicka += " -num-threads=1"
+	}
 
+	if !*uploadDownloadOnly {
+		prepDrive()
+		miscTest()
+	}
 	prepDrive()
-	miscTest()
-
-	prepDrive()
-	uploadDownloadTest()
+	uploadDownloadTest(*kill)
 }
 
 const driveDir = "/skicka_test"
@@ -128,6 +140,42 @@ func runCommand(c string, args ...string) error {
 	cmd.Stdout = os.Stdout
 	return cmd.Run()
 }
+
+func runButPossiblyKill(c string, args ...string) error {
+	log.Printf("Running %s %v", c, args)
+	cmd := getCommand(c, args...)
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+	if err := cmd.Start(); err != nil {
+		log.Fatal(err)
+	}
+
+	killed := false
+	if (rand.Int() % 2) == 1 {
+		wait := time.Duration(rand.Int()%30000) * time.Millisecond
+		log.Printf("Will try to kill process in %s", wait)
+		time.AfterFunc(wait, func() {
+			err := cmd.Process.Kill()
+			if err != nil {
+				log.Printf("Kill error! %v", err)
+			} else {
+				log.Printf("Killed process sucessfully")
+				killed = true
+			}
+		})
+	}
+
+	err := cmd.Wait()
+	if err != nil {
+		log.Printf("Wait result %v", err)
+	}
+	if killed {
+		return errKilled
+	}
+	return err
+}
+
+var errKilled = errors.New("killed while running")
 
 func runExpectSuccess(expected string, c string, args ...string) {
 	log.Printf("Running %s %v", c, args)
@@ -266,7 +314,7 @@ func miscTest() {
 
 var createdFiles = make(map[string]bool)
 
-func uploadDownloadTest() {
+func uploadDownloadTest(randomlyKill bool) {
 	tmpSrc, err := ioutil.TempDir("", "skicka-test-src")
 	if err != nil {
 		log.Fatalf("%s", err)
@@ -287,12 +335,12 @@ func uploadDownloadTest() {
 		}
 
 		// skicka upload (possibly encrypt)
-		if err := upload(tmpSrc); err != nil {
+		if err := upload(tmpSrc, randomlyKill); err != nil {
 			log.Fatalf("%s\n", err)
 		}
 
 		// skicka download to second tmp dir
-		if err := download(tmpDst); err != nil {
+		if err := download(tmpDst, randomlyKill); err != nil {
 			log.Fatalf("%s\n", err)
 		}
 
@@ -438,17 +486,41 @@ func update(dir string) error {
 		})
 }
 
-func upload(dir string) error {
+func upload(dir string, randomlyKill bool) (err error) {
 	log.Printf("Starting upload")
-	if encrypt {
-		return runCommand(skicka+" upload -encrypt", dir, modPath(driveDir))
+	for {
+		if randomlyKill {
+			if encrypt {
+				err = runButPossiblyKill(skicka+" upload -encrypt", dir, modPath(driveDir))
+			} else {
+				err = runButPossiblyKill(skicka+" upload", dir, modPath(driveDir))
+			}
+		} else {
+			if encrypt {
+				err = runCommand(skicka+" upload -encrypt", dir, modPath(driveDir))
+			} else {
+				err = runCommand(skicka+" upload", dir, modPath(driveDir))
+			}
+		}
+
+		if err != errKilled {
+			return
+		}
 	}
-	return runCommand(skicka+" upload", dir, modPath(driveDir))
 }
 
-func download(dir string) error {
+func download(dir string, randomlyKill bool) (err error) {
 	log.Printf("Starting download")
-	return runCommand(skicka+" download", modPath(driveDir), dir)
+	for {
+		if randomlyKill {
+			err = runButPossiblyKill(skicka+" download", modPath(driveDir), dir)
+		} else {
+			err = runCommand(skicka+" download", modPath(driveDir), dir)
+		}
+		if err != errKilled {
+			return
+		}
+	}
 }
 
 func compare(patha, pathb string) error {
