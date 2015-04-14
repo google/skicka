@@ -43,6 +43,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -183,6 +184,8 @@ type GDrive struct {
 	oAuthTransport *oauth.Transport
 	svc            *drive.Service
 	debug          func(s string, args ...interface{})
+	// Mutex that must be held when accessing dirToFiles or pathToFile.
+	metadataMutex sync.Mutex
 	// mapping from directory names to array of File pointers corresponding
 	// to the files in that directory.
 	dirToFiles map[string][]*File
@@ -539,6 +542,9 @@ func (gd *GDrive) UpdateMetadataCache(filename string) error {
 		return err
 	}
 
+	gd.metadataMutex.Lock()
+	defer gd.metadataMutex.Unlock()
+
 	// Convert the idToFile map to one map from parent folder path to array
 	// of Files in the folder and to a second map from path to array of
 	// Files at that path.
@@ -836,12 +842,17 @@ func canonicalPath(path string) string {
 // Note: an error is not returned if the file doesn't exist; the caller
 // should detect that case by checking for a zero-length returned array.
 func (gd *GDrive) GetFiles(path string) []*File {
+	gd.metadataMutex.Lock()
+	defer gd.metadataMutex.Unlock()
 	return gd.pathToFile[canonicalPath(path)]
 }
 
 // GetFilesInFolder returns a *File array representing the files in the
 // given folder with the given name. The files are sorted by pathname.
 func (gd *GDrive) GetFilesInFolder(path string) ([]*File, error) {
+	gd.metadataMutex.Lock()
+	defer gd.metadataMutex.Unlock()
+
 	if dirFiles, ok := gd.dirToFiles[canonicalPath(path)]; ok {
 		sort.Sort(byPath(dirFiles))
 		return dirFiles, nil
@@ -886,6 +897,9 @@ func (gd *GDrive) GetFilesUnderFolder(path string, includeBase bool) ([]*File, e
 		return files, ErrNotExist
 	}
 
+	gd.metadataMutex.Lock()
+	defer gd.metadataMutex.Unlock()
+
 	for _, f := range pathfiles {
 		if f.IsFolder() {
 			if includeBase {
@@ -902,6 +916,7 @@ func (gd *GDrive) GetFilesUnderFolder(path string, includeBase bool) ([]*File, e
 }
 
 func (gd *GDrive) getFolderContentsRecursive(parentFolder *File, files *[]*File) {
+	// The mutex for dirToFiles was acquired by GetFilesUnderFolder.
 	for _, f := range gd.dirToFiles[parentFolder.Path] {
 		*files = append(*files, f)
 		if f.IsFolder() {
@@ -1067,6 +1082,10 @@ func (gd *GDrive) CreateFolder(name string, parent *File,
 func (gd *GDrive) createFileOrFolder(name string, parent *File,
 	modTime time.Time, proplist []Property, mimeType string) (*File, error) {
 	path := canonicalPath(filepath.Join(parent.Path, name))
+
+	gd.metadataMutex.Lock()
+	defer gd.metadataMutex.Unlock()
+
 	if _, ok := gd.pathToFile[path]; ok {
 		panic(fmt.Sprintf("%s: already exists!", path))
 	}
