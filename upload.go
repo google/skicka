@@ -557,7 +557,7 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 			// or that there was file corruption of some sort. We'll be
 			// conservative and not clobber the Drive file in case it was
 			// the latter.
-			return true, fmt.Errorf("%s: has different contents versus Google "+
+			return false, fmt.Errorf("%s: has different contents versus Google "+
 				"Drive file %s, but doesn't have a newer timestamp. **Not updating"+
 				"the file on Drive**. Run 'touch' to update the file"+
 				"modification time and re-run skicka if you do want to"+
