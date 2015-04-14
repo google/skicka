@@ -46,7 +46,12 @@ type loggingTransport struct {
 }
 
 func (lt loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	dump, err := httputil.DumpRequestOut(req, false)
+	dumpBody := false
+	if ct, ok := req.Header["Content-Type"]; ok && len(ct) == 1 && ct[0] != "application/octet-stream" {
+		dumpBody = true
+	}
+
+	dump, err := httputil.DumpRequestOut(req, dumpBody)
 	if err != nil {
 		// Don't report an error back from RoundTrip() just because
 		// DumpRequestOut() ran into trouble.
@@ -54,7 +59,18 @@ func (lt loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 
 	resp, err := lt.transport.RoundTrip(req)
-	log.Printf("http request: %s--->response: %+v\n--->err: %v", dump, resp, err)
+
+	if resp != nil && dumpBody {
+		respBody, _ := ioutil.ReadAll(resp.Body)
+		resp.Body.Close()
+		resp.Body = ioutil.NopCloser(bytes.NewReader(respBody))
+		log.Printf("http request: %s--->response: %+v\nresponse body: %s\n--->err: %v",
+			sanitize(string(dump)), resp, string(respBody), err)
+	} else {
+		log.Printf("http request: %s--->response: %+v\n--->err: %v", sanitize(string(dump)),
+			resp, err)
+	}
+
 	return resp, err
 }
 
