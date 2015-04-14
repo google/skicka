@@ -201,7 +201,6 @@ func syncHierarchyDown(driveBasePath string, localBasePath string, trustTimes bo
 	// performance; we're more likely to have some workers actively
 	// downloading file contents while others are still making Drive API
 	// calls this way.
-	nWorkers := 4
 	toDownloadChan := make(chan *gdrive.File, 128)
 	doneChan := make(chan int, nWorkers)
 	progressBar := getProgressBar(nBytesToDownload)

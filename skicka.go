@@ -101,6 +101,12 @@ var (
 		LocalFilesUpdated int64
 		DriveFilesUpdated int64
 	}
+
+	// Smaller files will be handled with multiple threads going at once;
+	// doing so improves bandwidth utilization since round-trips to the
+	// Drive APIs take a while.  (However, we don't want too have too many
+	// workers; this would both lead to lots of 403 rate limit errors...)
+	nWorkers int
 )
 
 ///////////////////////////////////////////////////////////////////////////
@@ -734,6 +740,7 @@ func main() {
 		"Configuration file")
 	metadataCacheFilename := flag.String("metadata-cache-file", home+"/.skicka.metadata.cache",
 		"Filename for local cache of Google Drive file metadata")
+	nw := flag.Int("num-threads", 4, "Number of threads to use for uploads/downloads")
 	vb := flag.Bool("verbose", false, "Enable verbose output")
 	dbg := flag.Bool("debug", false, "Enable debugging output")
 	dumpHTTP := flag.Bool("dump-http", false, "Dump http traffic")
@@ -745,6 +752,8 @@ func main() {
 		shortUsage()
 		os.Exit(0)
 	}
+
+	nWorkers = *nw
 
 	debug = debugging(*dbg)
 	verbose = debugging(*vb || bool(debug))

@@ -351,12 +351,6 @@ func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTime
 		}
 	}
 
-	// Smaller files will be handled with multiple threads going at once;
-	// doing so improves bandwidth utilization since round-trips to the
-	// Drive APIs take a while.  (However, we don't want too have too many
-	// workers; this would both lead to lots of 403 rate limit errors...)
-	nWorkers := 4
-
 	// Upload worker threads send a value over this channel when
 	// they're done; the code that launches them waits for all of them
 	// to do so before returning.
