@@ -346,8 +346,7 @@ func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTime
 
 		if err := syncFileUp(fm.LocalPath, fm.LocalFileInfo, fm.DrivePath, encrypt,
 			fileProgressBar); err != nil {
-			nUploadErrors++
-			fmt.Fprintf(os.Stderr, "\nskicka: %v\n", err)
+			addErrorAndPrintMessage(&nUploadErrors, fm.LocalPath, err)
 		}
 	}
 
@@ -485,15 +484,16 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 
 	// With that check out of the way, take the opportunity to make sure
 	// the file has all of the properties that we expect.
-	if err = createMissingProperties(driveFile, stat.Mode(), encrypt); err != nil {
+	if err := createMissingProperties(driveFile, stat.Mode(), encrypt); err != nil {
+		debug.Printf("%s: error creating properties: %s", driveFile, err)
 		return false, err
 	}
 
 	// Go ahead and update the file's permissions if they've changed.
 	bitsString := fmt.Sprintf("%#o", stat.Mode()&os.ModePerm)
 	debug.Printf("%s: updating permissions to %s", drivePath, bitsString)
-	err = gd.UpdateProperty(driveFile, "Permissions", bitsString)
-	if err != nil {
+	if err := gd.UpdateProperty(driveFile, "Permissions", bitsString); err != nil {
+		debug.Printf("%s: error updating permissions properties: %s", driveFile, err)
 		return false, err
 	}
 
@@ -586,12 +586,21 @@ func compileUploadFileTree(localPath, drivePath string,
 	// different...
 	if stat, err := os.Stat(localPath); err == nil && stat.IsDir() == false {
 		driveFile, err := gd.GetFile(drivePath)
-		if err == nil && driveFile.IsFolder() {
-			// The local path is for a file and the Drive path is for a
-			// folder; update the drive path to end with the base of the
-			// local filename.
-			drivePath = filepath.Join(drivePath, filepath.Base(localPath))
+		switch err {
+		case nil:
+			if driveFile.IsFolder() {
+				// The local path is for a file and the Drive path is for a
+				// folder; update the drive path to end with the base of the
+				// local filename.
+				drivePath = filepath.Join(drivePath, filepath.Base(localPath))
+			}
+		case gdrive.ErrNotExist:
+			// This is fine.
+		default:
+			fmt.Fprintf(os.Stderr, "skicka: %s: %s\n", drivePath, err)
+			return nil, 1
 		}
+
 		if encrypt {
 			drivePath += encryptionSuffix
 		}
