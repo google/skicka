@@ -407,11 +407,14 @@ func fileNeedsDownload(localPath string, driveFile *gdrive.File,
 	trustTimes bool) (bool, error) {
 	// See if the local version of the file exists at all.
 	stat, err := os.Stat(localPath)
-	if err != nil {
-		// The local file doesn't exist (probably). Download it.
-		// TODO: confirm that's in fact the error...
-		debug.Printf("fileNeedsDownload: stat %s -> error %v; assuming file doesn't exist",
-			localPath, err)
+	if err == os.ErrNotExist {
+		// The local file doesn't exist. This is fine. Download it.
+		debug.Printf("fileNeedsDownload: %s: doesn't exist. Downloading.", localPath)
+		return true, nil
+	} else if err != nil {
+		// Some other error. Troubling, but go for the download and see if
+		// things work out.
+		debug.Printf("fileNeedsDownload: %s: %s. Downloading.", localPath, err)
 		return true, nil
 	}
 
