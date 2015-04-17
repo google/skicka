@@ -441,7 +441,7 @@ func (gd *GDrive) getMetadataChanges(svc *drive.Service, startChangeId int64,
 		bar.Finish()
 	}
 
-	gd.debug("done updating from drive %s", time.Now().String())
+	gd.debug("Done updating metadata from Drive")
 }
 
 // saveMetadataCache saves both the current maximum change id as well as
@@ -516,7 +516,7 @@ func (gd *GDrive) saveMetadataCache(filename string, maxChangeId int64,
 		}
 	}
 
-	gd.debug("Done writing new file cache to disk %s", time.Now().String())
+	gd.debug("Done writing new file cache to disk")
 	return nil
 }
 
@@ -627,7 +627,7 @@ func (gd *GDrive) getIdToFile(filename string) (map[string]*File, error) {
 		if err := decoder.Decode(&maxChangeId); err != nil {
 			return nil, err
 		}
-		gd.debug("Read max change id %d\n", maxChangeId)
+		gd.debug("Read max change id %d", maxChangeId)
 
 		// As soon as we know the id of the last change in the metadata
 		// file, we can kick off the goroutine that starts pulling changes
@@ -639,7 +639,7 @@ func (gd *GDrive) getIdToFile(filename string) (map[string]*File, error) {
 		if err := decoder.Decode(&idToFile); err != nil {
 			return nil, err
 		}
-		gd.debug("Done reading file cache from disk @ %s\n", time.Now().String())
+		gd.debug("Done reading file cache from disk")
 	} else {
 		// No metadata available locally; pull the entire history from Drive.
 		go gd.getMetadataChanges(gd.svc, maxChangeId, changeChan, errorChan)
@@ -676,10 +676,10 @@ outer:
 			return nil, err
 		}
 	}
-	gd.debug("File cache has %d items\n", len(idToFile))
+	gd.debug("File cache has %d items", len(idToFile))
 
 	if newMaxChangeId > maxChangeId {
-		gd.debug("Writing updated file cache to disk: maxChangeId now %d\n",
+		gd.debug("Writing updated file cache to disk: maxChangeId now %d",
 			newMaxChangeId)
 		err := gd.saveMetadataCache(filename, newMaxChangeId, idToFile)
 		if err != nil {
@@ -696,7 +696,8 @@ func getFilePath(path string, parentId string, idToFile map[string]*File, paths 
 			// We're at the root, which doesn't have any parents.
 			// Double-check, though.
 			if parentFile.Path != "." {
-				panic("no parents, but path isn't \".\"?")
+				panic(fmt.Sprintf("no parents for file %+v with WIP path %s "+
+					"but parent path isn't \".\"?", parentFile, path))
 			}
 			*paths = append(*paths, path)
 		} else {
