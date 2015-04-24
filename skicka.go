@@ -684,7 +684,7 @@ Commands and their options are:
   upload     Uploads all files in the local directory and its children to the
              given Google Drive path. Skips files that have already been
              uploaded.
-             Arguments: [-ignore-times] [-encrypt] local_path drive_path
+             Arguments: [-ignore-times] [-encrypt] [-follow-symlinks <maxdepth>] local_path drive_path
 
 Options valid for both "upload" and "download":
   -ignore-times    Normally, skicka assumes that if the timestamp of a local file

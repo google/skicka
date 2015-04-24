@@ -30,13 +30,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
 func uploadUsage() {
-	fmt.Printf("Usage: skicka upload [-ignore-times] [-encrypt] local_path drive_path\n")
+	fmt.Printf("Usage: skicka upload [-ignore-times] [-encrypt] [-follow-symlinks <maxdepth>] local_path drive_path\n")
 	fmt.Printf("Run \"skicka help\" for more detailed help text.\n")
 }
 
@@ -50,12 +51,20 @@ func upload(args []string) int {
 	}
 
 	i := 0
+	maxSymlinkDepth := 0
 	for ; i+2 < len(args); i++ {
 		switch args[i] {
 		case "-ignore-times":
 			ignoreTimes = true
 		case "-encrypt":
 			encrypt = true
+		case "-follow-symlinks":
+			var err error
+			maxSymlinkDepth, err = strconv.Atoi(args[i+1])
+			if err != nil {
+				printErrorAndExit(err)
+			}
+			i++
 		default:
 			uploadUsage()
 			return 1
@@ -92,7 +101,8 @@ func upload(args []string) int {
 	}
 
 	syncStartTime = time.Now()
-	errs := syncHierarchyUp(localPath, drivePath, encrypt, trustTimes)
+	errs := syncHierarchyUp(localPath, drivePath, encrypt, trustTimes,
+		maxSymlinkDepth)
 	printFinalStats()
 
 	return errs
@@ -258,13 +268,14 @@ func uploadFileContents(localPath string, driveFile *gdrive.File, encrypt bool,
 // Synchronize a local directory hierarchy with Google Drive.
 // localPath is the file or directory to start with, driveRoot is
 // the directory into which the file/directory will be sent
-func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTimes bool) int {
+func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTimes bool,
+	maxSymlinkDepth int) int {
 	if encrypt && key == nil {
 		key = decryptEncryptionKey()
 	}
 
 	fileMappings, nUploadErrors := compileUploadFileTree(localPath, driveRoot,
-		encrypt, trustTimes)
+		encrypt, trustTimes, maxSymlinkDepth)
 	if len(fileMappings) == 0 {
 		fmt.Fprintln(os.Stderr, "skicka: No files to be uploaded.")
 		return 0
@@ -419,9 +430,13 @@ func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTime
 
 	if nUploadErrors > 0 {
 		fmt.Fprintf(os.Stderr, "skicka: %d files not uploaded due to errors. "+
-			"This is likely a transient failure; try uploading again.", nUploadErrors)
+			"This may be a transient failure; try uploading again.\n", nUploadErrors)
 	}
 	return int(nUploadErrors)
+}
+
+func isSymlink(stat os.FileInfo) bool {
+	return (stat.Mode() & os.ModeSymlink) != 0
 }
 
 // Determine if the local file needs to be uploaded to Google Drive.
@@ -443,10 +458,9 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 		}
 	}
 
-	// Don't try to upload files that are symlinks.
-	if (stat.Mode() & os.ModeSymlink) != 0 {
-		fmt.Fprintf(os.Stderr, "skicka: %s: ignoring symlink.\n", localPath)
-		return false, nil
+	if isSymlink(stat) {
+		// This shouldn't happen.
+		return false, fmt.Errorf("%s: unexpected symlink!", localPath)
 	}
 
 	// See if the file exists: if not, then we definitely need to do the
@@ -574,12 +588,108 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 	return false, gd.UpdateModificationTime(driveFile, stat.ModTime())
 }
 
+// Given a path to a file and its FileInfo, follow symlinks starting at the
+// path up to *maxSymlinkDepth. Returns an error if the maximum depth is
+// reached and it is at symlink; otherwise returns the resolved path and
+// FileInfo.  Decrements the counter in *maxSymlinkDepth according to the
+// number of symlinks followed.
+func resolveSymlinks(path string, stat os.FileInfo, maxSymlinkDepth *int) (string, os.FileInfo, error) {
+	origPath := path
+	for *maxSymlinkDepth > 0 && isSymlink(stat) {
+		var err error
+		path, err = filepath.EvalSymlinks(path)
+		if err != nil {
+			return path, stat, err
+		}
+
+		*maxSymlinkDepth -= 1
+
+		stat, err = os.Stat(path)
+		if err != nil {
+			return path, stat, err
+		}
+	}
+
+	if isSymlink(stat) {
+		return path, stat, fmt.Errorf("%s: maximum symlink depth reached.", origPath)
+	}
+	return path, stat, nil
+}
+
+// Walk the local filesystem starting at localPath; for each file
+// encountered, determine if the file needs to be uploaded. If so, an entry
+// is added to the returned localToRemoteFileMapping array.
+func walkPathForUploads(localPath, drivePath string, encrypt,
+	trustTimes bool, maxSymlinkDepth int) ([]localToRemoteFileMapping, int32) {
+	var fileMappings []localToRemoteFileMapping
+	nErrs := int32(0)
+
+	pathWalkFunc := func(path string, stat os.FileInfo, patherr error) error {
+		path = filepath.Clean(path)
+		if patherr != nil {
+			debug.Printf("%s: %v", path, patherr)
+			return nil
+		}
+
+		// Get the file's path relative to the base directory we're
+		// uploading from.
+		relPath, err := filepath.Rel(localPath, path)
+		if err != nil {
+			return err
+		}
+		drivePath := filepath.Join(drivePath, relPath)
+
+		if isSymlink(stat) {
+			// Follow symlinks up to the depth allowed.
+			maxDepth := maxSymlinkDepth
+			path, stat, err = resolveSymlinks(path, stat, &maxDepth)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "skicka: %s\n", err)
+				nErrs++
+				return nil
+			}
+
+			// We reached a non-symlink. Make a recursive call to
+			// walkPathForUploads in case we reached a directory; note that
+			// the maxDepth passed in accounts for the number of links we
+			// followed to get to this point.
+			mappings, ne := walkPathForUploads(path, drivePath, encrypt,
+				trustTimes, maxDepth)
+			fileMappings = append(fileMappings, mappings...)
+			nErrs += ne
+			return nil
+		}
+
+		if stat.IsDir() == false && encrypt == true {
+			drivePath += encryptionSuffix
+		}
+
+		upload, err := fileNeedsUpload(path, drivePath, stat, encrypt, trustTimes)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "skicka: %s\n", err)
+			nErrs++
+		} else if upload {
+			fileMappings = append(fileMappings,
+				localToRemoteFileMapping{path, drivePath, stat})
+		}
+
+		// Always return nil: we don't want to stop walking the
+		// hierarchy just because we hit an error deciding if one file
+		// needs to be uploaded.
+		return nil
+	}
+
+	if err := filepath.Walk(localPath, pathWalkFunc); err != nil {
+		fmt.Fprintf(os.Stderr, "skicka: %s\n", err)
+		nErrs++
+	}
+	return fileMappings, nErrs
+}
+
 func compileUploadFileTree(localPath, drivePath string,
-	encrypt, trustTimes bool) ([]localToRemoteFileMapping, int32) {
+	encrypt, trustTimes bool, maxSymlinkDepth int) ([]localToRemoteFileMapping, int32) {
 	// Walk the local directory hierarchy starting at 'localPath' and build
 	// an array of files that may need to be synchronized.
-	var fileMappings []localToRemoteFileMapping
-
 	nUploadErrors := int32(0)
 
 	// If we're just uploading a single file, some of the details are
@@ -605,6 +715,16 @@ func compileUploadFileTree(localPath, drivePath string,
 			drivePath += encryptionSuffix
 		}
 
+		if isSymlink(stat) {
+			localPath, stat, err = resolveSymlinks(localPath, stat, &maxSymlinkDepth)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "skicka: %s", err)
+				nUploadErrors++
+				return nil, nUploadErrors
+			}
+		}
+
+		var fileMappings []localToRemoteFileMapping
 		upload, err := fileNeedsUpload(localPath, drivePath, stat,
 			encrypt, trustTimes)
 		if err != nil {
@@ -618,46 +738,10 @@ func compileUploadFileTree(localPath, drivePath string,
 	}
 
 	fmt.Fprintf(os.Stderr, "skicka: Getting list of local files... ")
-	err := filepath.Walk(localPath,
-		func(path string, stat os.FileInfo, patherr error) error {
-			path = filepath.Clean(path)
-			if patherr != nil {
-				debug.Printf("%s: %v", path, patherr)
-				return nil
-			}
-
-			// Get the file's path relative to the base directory we're
-			// uploading from.
-			relPath, err := filepath.Rel(localPath, path)
-			if err != nil {
-				return err
-			}
-			drivePath := filepath.Join(drivePath, relPath)
-			if stat.IsDir() == false && encrypt == true {
-				drivePath += encryptionSuffix
-			}
-
-			upload, err := fileNeedsUpload(path, drivePath, stat,
-				encrypt, trustTimes)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "skicka: %s", err)
-				nUploadErrors++
-			} else if upload {
-				fileMappings = append(fileMappings,
-					localToRemoteFileMapping{path, drivePath, stat})
-			}
-
-			// Always return nil: we don't want to stop walking the
-			// hierarchy just because we hit an error deciding if one file
-			// needs to be uploaded.
-			return nil
-		})
+	fileMappings, nErrs := walkPathForUploads(localPath, drivePath, encrypt,
+		trustTimes, maxSymlinkDepth)
+	nUploadErrors += nErrs
 	fmt.Fprintf(os.Stderr, "Done.\n")
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "skicka: %s", err)
-		nUploadErrors++
-	}
 
 	return fileMappings, nUploadErrors
 }
