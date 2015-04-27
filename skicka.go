@@ -37,6 +37,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -734,11 +735,14 @@ func userHomeDir() string {
 
 func main() {
 	home := userHomeDir()
-	tokenCacheFilename := flag.String("tokencache", home+"/.skicka.tokencache.json",
+	tokenCacheFilename := flag.String("tokencache",
+		filepath.Join(home, ".skicka.tokencache.json"),
 		"OAuth2 token cache file")
-	configFilename := flag.String("config", home+"/.skicka.config",
+	configFilename := flag.String("config",
+		filepath.Join(home, ".skicka.config"),
 		"Configuration file")
-	metadataCacheFilename := flag.String("metadata-cache-file", home+"/.skicka.metadata.cache",
+	metadataCacheFilename := flag.String("metadata-cache-file",
+		filepath.Join(home, "/.skicka.metadata.cache"),
 		"Filename for local cache of Google Drive file metadata")
 	nw := flag.Int("num-threads", 4, "Number of threads to use for uploads/downloads")
 	vb := flag.Bool("verbose", false, "Enable verbose output")
