@@ -511,6 +511,14 @@ func (gd *GDrive) saveMetadataCache(filename string, maxChangeId int64,
 		} else if err := flocal.Close(); err != nil {
 			return err
 		}
+
+		// Windows doesn't let us rename one file on top of an existing
+		// one. Therefore, when running on Windows, remove the target file
+		// first.
+		if runtime.GOOS == "windows" {
+			_ = os.Remove(filename)
+		}
+
 		if err := os.Rename(flocal.Name(), filename); err != nil {
 			return err
 		}
