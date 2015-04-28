@@ -1191,3 +1191,42 @@ func (gd *GDrive) TrashFile(f *File) error {
 		}
 	}
 }
+
+type SpaceUser struct {
+	Name string
+	Used int64
+}
+
+type Usage struct {
+	Capacity int64
+	Used     int64
+	Users    []SpaceUser
+}
+
+// GetDriveUsage returns a structure with information about the current
+// storage usage on Google Drive.
+func (gd *GDrive) GetDriveUsage() (Usage, error) {
+	var about *drive.About
+	var err error
+
+	for try := 0; ; try++ {
+		about, err = gd.svc.About.Get().Do()
+		if err == nil {
+			break
+		}
+		if err = gd.tryToHandleDriveAPIError(err, try); err != nil {
+			return Usage{}, err
+		}
+	}
+
+	var users []SpaceUser
+	users = append(users, SpaceUser{Name: "Trash", Used: about.QuotaBytesUsedInTrash})
+	for _, s := range about.QuotaBytesByService {
+		users = append(users, SpaceUser{Name: s.ServiceName, Used: s.BytesUsed})
+	}
+
+	return Usage{
+		Capacity: about.QuotaBytesTotal,
+		Used:     about.QuotaBytesUsedAggregate,
+		Users:    users}, nil
+}

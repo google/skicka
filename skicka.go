@@ -650,6 +650,9 @@ Commands and their options are:
              Google Drive file, the download is skipped.
              Arguments: [-ignore-times] drive_path local_path
 
+  df         Prints the total space used and amount of available space on
+             Google Drive.
+
   du         Print the space used by the Google Drive folder and its children.
              Arguments: [drive_path ...]
 
@@ -720,6 +723,7 @@ func shortUsage() {
 Supported commands are:
   cat       Print the contents of the given file
   download  Download a file or folder hierarchy from Drive to the local disk
+  df        Display free space on Drive
   du        Report disk usage for a folder hierarchy on Drive
   fsck      Check consistency of files in Drive and local metadata cache
   genkey    Generate a new encryption key
@@ -804,8 +808,9 @@ func main() {
 	// Check this before creating the GDrive object so that we don't spend
 	// a lot of time updating the cache if we were just going to print the
 	// usage message.
-	if cmd != "cat" && cmd != "download" && cmd != "du" && cmd != "fsck" &&
-		cmd != "ls" && cmd != "mkdir" && cmd != "rm" && cmd != "upload" {
+	if cmd != "cat" && cmd != "download" && cmd != "df" && cmd != "du" &&
+		cmd != "fsck" && cmd != "ls" && cmd != "mkdir" && cmd != "rm" &&
+		cmd != "upload" {
 		shortUsage()
 		os.Exit(1)
 	}
@@ -858,6 +863,8 @@ func main() {
 		errs = cat(args)
 	case "download":
 		errs = download(args)
+	case "df":
+		errs = df(args)
 	case "du":
 		errs = du(args)
 	case "fsck":
