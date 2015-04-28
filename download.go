@@ -109,7 +109,9 @@ func syncOneFileDown(file *gdrive.File, localPath string, trustTimes bool) error
 
 	if needsDownload {
 		pb := getProgressBar(file.FileSize)
-		defer pb.Finish()
+		if pb != nil {
+			defer pb.Finish()
+		}
 		return downloadFile(file, localPath, pb)
 	}
 
@@ -133,10 +135,10 @@ func syncHierarchyDown(driveBasePath string, localBasePath string, trustTimes bo
 
 	// Get the files from Drive under driveBasePath.
 	includeBase := true
-	fmt.Fprintf(os.Stderr, "skicka: Getting list of files to download... ")
+	message("Getting list of files to download... ")
 	filesOnDrive, err := gd.GetFilesUnderFolder(driveBasePath, includeBase)
 	checkFatalError(err, "error getting files from Drive")
-	fmt.Fprintf(os.Stderr, "Done. Starting download.\n")
+	message("Done. Starting download.\n")
 
 	// We won't download files where there are multiple versions of the
 	// file with the same name on Drive.  Issue warnings about any dupes
@@ -193,7 +195,7 @@ func syncHierarchyDown(driveBasePath string, localBasePath string, trustTimes bo
 
 	// Bail out early if everything is up to date.
 	if len(filesToDownload) == 0 {
-		fmt.Fprintf(os.Stderr, "skicka: Nothing to download.\n")
+		message("Nothing to download.")
 		return 0
 	}
 
@@ -236,7 +238,9 @@ func syncHierarchyDown(driveBasePath string, localBasePath string, trustTimes bo
 	for i := 0; i < nWorkers; i++ {
 		<-doneChan
 	}
-	progressBar.Finish()
+	if progressBar != nil {
+		progressBar.Finish()
+	}
 
 	if nDownloadErrors > 0 {
 		fmt.Fprintf(os.Stderr, "skicka: %d files not downloaded due to errors\n",
@@ -293,6 +297,10 @@ func createPathMap(files []*gdrive.File, localBasePath, driveBasePath string) ma
 }
 
 func getProgressBar(nBytes int64) *pb.ProgressBar {
+	if quiet {
+		return nil
+	}
+
 	progressBar := pb.New64(nBytes).SetUnits(pb.U_BYTES)
 	progressBar.ShowBar = true
 	progressBar.Output = os.Stderr
@@ -310,7 +318,12 @@ func downloadFile(f *gdrive.File, localPath string, progressBar *pb.ProgressBar)
 
 	// Tee writes to the progress bar, which provides the Writer interface
 	// and updates itself according to the number of bytes that it sees.
-	multiwriter := io.MultiWriter(writeCloser, progressBar)
+	var multiwriter io.Writer
+	if progressBar != nil {
+		multiwriter = io.MultiWriter(writeCloser, progressBar)
+	} else {
+		multiwriter = writeCloser
+	}
 
 	// FIXME: downloadDriveFile needs a name that better distinguishes its
 	// function from downloadFile.

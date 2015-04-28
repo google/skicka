@@ -156,7 +156,9 @@ func syncFileUp(localPath string, stat os.FileInfo, drivePath string, encrypt bo
 			proplist)
 		checkFatalError(err, fmt.Sprintf("%s: create folder", drivePath))
 
-		pb.Increment()
+		if pb != nil {
+			pb.Increment()
+		}
 		atomic.AddInt64(&stats.UploadBytes, stat.Size())
 		verbose.Printf("Created Google Drive folder %s", drivePath)
 	} else {
@@ -231,7 +233,12 @@ func uploadFileContents(localPath string, driveFile *gdrive.File, encrypt bool,
 
 		// Also tee reads to the progress bar as they are done so that it
 		// stays in sync with how much data has been transmitted.
-		uploadReader := io.TeeReader(countingReader, pb)
+		var uploadReader io.Reader
+		if pb != nil {
+			uploadReader = io.TeeReader(countingReader, pb)
+		} else {
+			uploadReader = countingReader
+		}
 
 		if length >= resumableUploadMinSize {
 			err = gd.UploadFileContentsResumable(driveFile, uploadReader, length)
@@ -250,7 +257,9 @@ func uploadFileContents(localPath string, driveFile *gdrive.File, encrypt bool,
 		// The "progress" made so far on this file should be rolled back;
 		// if we don't do this, when retries happen, we end up going over
 		// 100% progress...
-		pb.Add64(-countingReader.bytesRead)
+		if pb != nil {
+			pb.Add64(-countingReader.bytesRead)
+		}
 
 		if re, ok := err.(gdrive.RetryHTTPTransmitError); ok && try < 5 {
 			debug.Printf("%s: got retry http error--retrying: %s",
@@ -259,7 +268,9 @@ func uploadFileContents(localPath string, driveFile *gdrive.File, encrypt bool,
 			debug.Printf("%s: giving up due to error: %v", localPath, err)
 			// We're giving up on this file, so subtract its length from
 			// what the progress bar is expecting.
-			pb.Total -= length
+			if pb != nil {
+				pb.Total -= length
+			}
 			return err
 		}
 	}
@@ -277,7 +288,7 @@ func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTime
 	fileMappings, nUploadErrors := compileUploadFileTree(localPath, driveRoot,
 		encrypt, trustTimes, maxSymlinkDepth)
 	if len(fileMappings) == 0 {
-		fmt.Fprintln(os.Stderr, "skicka: No files to be uploaded.")
+		message("No files to be uploaded.")
 		return 0
 	}
 
@@ -305,11 +316,13 @@ func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTime
 
 	if len(directoryNames) > 0 {
 		// Actually create/update the directories.
-		dirProgressBar := pb.New(len(directoryNames))
-		dirProgressBar.ShowBar = true
-		dirProgressBar.Output = os.Stderr
-		dirProgressBar.Prefix("Directories: ")
-		dirProgressBar.Start()
+		var dirProgressBar *pb.ProgressBar
+		if !quiet {
+			dirProgressBar = pb.New(len(directoryNames))
+			dirProgressBar.Output = os.Stderr
+			dirProgressBar.Prefix("Directories: ")
+			dirProgressBar.Start()
+		}
 
 		// Sync each of the directories, which serves to create any missing ones.
 		for _, dirName := range directoryNames {
@@ -323,14 +336,18 @@ func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTime
 				printErrorAndExit(err)
 			}
 		}
-		dirProgressBar.Finish()
+		if dirProgressBar != nil {
+			dirProgressBar.Finish()
+		}
 	}
 
-	fileProgressBar := pb.New64(nBytesToUpload).SetUnits(pb.U_BYTES)
-	fileProgressBar.ShowBar = true
-	fileProgressBar.Output = os.Stderr
-	fileProgressBar.Prefix("Files: ")
-	fileProgressBar.Start()
+	var fileProgressBar *pb.ProgressBar
+	if !quiet {
+		fileProgressBar = pb.New64(nBytesToUpload).SetUnits(pb.U_BYTES)
+		fileProgressBar.Output = os.Stderr
+		fileProgressBar.Prefix("Files: ")
+		fileProgressBar.Start()
+	}
 
 	// Sort the files by size, small to large.
 	sort.Sort(localToRemoteBySize(fileMappings))
@@ -426,7 +443,9 @@ func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTime
 	for i := 0; i < nWorkers; i++ {
 		<-doneChan
 	}
-	fileProgressBar.Finish()
+	if fileProgressBar != nil {
+		fileProgressBar.Finish()
+	}
 
 	if nUploadErrors > 0 {
 		fmt.Fprintf(os.Stderr, "skicka: %d files not uploaded due to errors. "+
@@ -460,7 +479,7 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 
 	if isSymlink(stat) {
 		// This shouldn't happen.
-		return false, fmt.Errorf("%s: unexpected symlink!", localPath)
+		return false, fmt.Errorf("%s: unexpected symlink", localPath)
 	}
 
 	// See if the file exists: if not, then we definitely need to do the
@@ -611,7 +630,7 @@ func resolveSymlinks(path string, stat os.FileInfo, maxSymlinkDepth *int) (strin
 	}
 
 	if isSymlink(stat) {
-		return path, stat, fmt.Errorf("%s: maximum symlink depth reached.", origPath)
+		return path, stat, fmt.Errorf("%s: maximum symlink depth reached", origPath)
 	}
 	return path, stat, nil
 }
@@ -737,11 +756,11 @@ func compileUploadFileTree(localPath, drivePath string,
 		return fileMappings, nUploadErrors
 	}
 
-	fmt.Fprintf(os.Stderr, "skicka: Getting list of local files... ")
+	message("Getting list of local files... ")
 	fileMappings, nErrs := walkPathForUploads(localPath, drivePath, encrypt,
 		trustTimes, maxSymlinkDepth)
 	nUploadErrors += nErrs
-	fmt.Fprintf(os.Stderr, "Done.\n")
+	message("Done.")
 
 	return fileMappings, nUploadErrors
 }

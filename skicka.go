@@ -67,6 +67,7 @@ var (
 
 	debug   debugging
 	verbose debugging
+	quiet   bool
 
 	// Configuration read in from the skicka config file.
 	config struct {
@@ -141,6 +142,12 @@ func debugPrint(s string, args ...interface{}) {
 
 func (d debugging) Printf(format string, args ...interface{}) {
 	if d {
+		log.Print(sanitize(fmt.Sprintf(format, args...)))
+	}
+}
+
+func message(format string, args ...interface{}) {
+	if !quiet {
 		log.Print(sanitize(fmt.Sprintf(format, args...)))
 	}
 }
@@ -247,21 +254,21 @@ func printFinalStats() {
 	defer statsMutex.Unlock()
 
 	syncTime := time.Now().Sub(syncStartTime)
-	fmt.Printf("skicka: Preparation time %s, sync time %s\n",
+	message("Preparation time %s, sync time %s\n",
 		fmtDuration(syncStartTime.Sub(startTime)), fmtDuration(syncTime))
-	fmt.Printf("skicka: Updated %d Drive files, %d local files\n",
+	message("Updated %d Drive files, %d local files\n",
 		stats.DriveFilesUpdated, stats.LocalFilesUpdated)
-	fmt.Printf("skicka: %s read from disk, %s written to disk\n",
+	message("%s read from disk, %s written to disk\n",
 		fmtbytes(stats.DiskReadBytes, false),
 		fmtbytes(stats.DiskWriteBytes, false))
-	fmt.Printf("skicka: %s uploaded (%s/s), %s downloaded (%s/s)\n",
+	message("%s uploaded (%s/s), %s downloaded (%s/s)\n",
 		fmtbytes(stats.UploadBytes, false),
 		fmtbytes(int64(float64(stats.UploadBytes)/syncTime.Seconds()),
 			false),
 		fmtbytes(stats.DownloadBytes, false),
 		fmtbytes(int64(float64(stats.DownloadBytes)/syncTime.Seconds()),
 			false))
-	fmt.Printf("skicka: %s peak memory used\n",
+	message("%s peak memory used\n",
 		fmtbytes(maxActiveBytes, false))
 }
 
@@ -554,7 +561,7 @@ func createConfigFile(filename string) {
 		if err != nil {
 			printErrorAndExit(fmt.Errorf("%s: %v", filename, err))
 		}
-		fmt.Printf("skicka: created configuration file %s.\n", filename)
+		message("created configuration file %s.\n", filename)
 	} else {
 		printErrorAndExit(fmt.Errorf("%s: file already exists; "+
 			"leaving it alone.", filename))
@@ -701,6 +708,7 @@ General options valid for all commands:
   -metadata-cache-file <filename>
                          File to store metadata about Google Drive contents.
                          Default: ~/.skicka.metadata.cache
+  -quiet                 Suppress non-error messages.
   -tokencache <filename> OAuth2 token cache file. Default: ~/.skicka.tokencache.json.
   -verbose               Enable verbose output.
 `)
@@ -750,6 +758,7 @@ func main() {
 	nw := flag.Int("num-threads", 4, "Number of threads to use for uploads/downloads")
 	vb := flag.Bool("verbose", false, "Enable verbose output")
 	dbg := flag.Bool("debug", false, "Enable debugging output")
+	qt := flag.Bool("quiet", false, "Suppress non-error messages")
 	dumpHTTP := flag.Bool("dump-http", false, "Dump http traffic")
 	flakyHTTP := flag.Bool("flaky-http", false, "Add flakiness to http traffic")
 	flag.Usage = usage
@@ -764,6 +773,7 @@ func main() {
 
 	debug = debugging(*dbg)
 	verbose = debugging(*vb || bool(debug))
+	quiet = *qt
 
 	cmd := flag.Arg(0)
 	// Commands that don't need the config file to be read or to use
@@ -834,7 +844,7 @@ func main() {
 	gd, err = gdrive.New(config.Google.ClientId, config.Google.ClientSecret,
 		*tokenCacheFilename, config.Upload.Bytes_per_second_limit,
 		config.Download.Bytes_per_second_limit, dpf, transport,
-		*metadataCacheFilename)
+		*metadataCacheFilename, quiet)
 	if err != nil {
 		printErrorAndExit(fmt.Errorf("error creating Google Drive "+
 			"client: %v", err))

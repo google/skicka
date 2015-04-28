@@ -184,6 +184,7 @@ type GDrive struct {
 	oAuthTransport *oauth.Transport
 	svc            *drive.Service
 	debug          func(s string, args ...interface{})
+	quiet          bool
 	// Mutex that must be held when accessing dirToFiles or pathToFile.
 	metadataMutex sync.Mutex
 	// mapping from directory names to array of File pointers corresponding
@@ -301,7 +302,7 @@ func (gd *GDrive) runQuery(query string, process func(*drive.File)) error {
 func New(clientId, clientSecret, cacheFile string,
 	uploadBytesPerSecond, downloadBytesPerSecond int,
 	debug func(s string, args ...interface{}), transport http.RoundTripper,
-	metadataCacheFilename string) (*GDrive, error) {
+	metadataCacheFilename string, quiet bool) (*GDrive, error) {
 	config := &oauth.Config{
 		ClientId:     clientId,
 		ClientSecret: clientSecret,
@@ -318,6 +319,7 @@ func New(clientId, clientSecret, cacheFile string,
 			Transport: transport,
 		},
 		debug: debug,
+		quiet: quiet,
 	}
 
 	token, err := config.TokenCache.Token()
@@ -376,7 +378,7 @@ func (gd *GDrive) getMetadataChanges(svc *drive.Service, startChangeId int64,
 	// the trouble.
 	var bar *pb.ProgressBar
 	numChanges := about.LargestChangeId - startChangeId
-	if numChanges > 1000 {
+	if numChanges > 1000 && !gd.quiet {
 		bar = pb.New64(numChanges)
 		bar.ShowBar = true
 		bar.ShowCounters = false
@@ -730,12 +732,15 @@ func (gd *GDrive) CheckMetadata(filename string, report func(string)) error {
 	}
 
 	// This will almost certainly take a while, so put up a progress bar.
-	bar := pb.New(len(idToFile))
-	bar.ShowBar = true
-	bar.ShowCounters = false
-	bar.Output = os.Stderr
-	bar.Prefix("Checking metadata cache: ")
-	bar.Start()
+	var bar *pb.ProgressBar
+	if !gd.quiet {
+		bar = pb.New(len(idToFile))
+		bar.ShowBar = true
+		bar.ShowCounters = false
+		bar.Output = os.Stderr
+		bar.Prefix("Checking metadata cache: ")
+		bar.Start()
+	}
 
 	err = gd.runQuery("trashed=false", func(f *drive.File) {
 		if file, ok := idToFile[f.Id]; ok {
@@ -744,7 +749,9 @@ func (gd *GDrive) CheckMetadata(filename string, report func(string)) error {
 				report(fmt.Sprintf("%s: metadata mismatch.\nLocal: %+v\nDrive: %+v",
 					file.Path, file, df))
 			}
-			bar.Increment()
+			if bar != nil {
+				bar.Increment()
+			}
 			delete(idToFile, f.Id)
 		} else {
 			// It'd be preferable to have "sharedWithMe=false" included in
@@ -762,7 +769,9 @@ func (gd *GDrive) CheckMetadata(filename string, report func(string)) error {
 			f.Path, f))
 	}
 
-	bar.Finish()
+	if bar != nil {
+		bar.Finish()
+	}
 	return nil
 }
 
