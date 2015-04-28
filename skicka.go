@@ -695,10 +695,13 @@ Options valid for both "upload" and "download":
                    force checking file contents in this case.
 
 General options valid for all commands:
-  -config=<filename>     Specify a configuration file. Default: ~/.skicka.config.
+  -config <filename>     General skicka configuration file. Default: ~/.skicka.config.
   -debug                 Enable debugging output.
   -dump-http             Dump http traffic.
-  -tokencache=<filename> OAuth2 token cache file. Default: ~/.skicka.tokencache.json.
+  -metadata-cache-file <filename>
+                         File to store metadata about Google Drive contents.
+                         Default: ~/.skicka.metadata.cache
+  -tokencache <filename> OAuth2 token cache file. Default: ~/.skicka.tokencache.json.
   -verbose               Enable verbose output.
 `)
 }
