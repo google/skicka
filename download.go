@@ -571,7 +571,7 @@ func getLocalWriterForDriveFile(localPath string,
 	if err != nil {
 		permissions = 0644
 	}
-	err = f.Chmod(permissions)
+	err = os.Chmod(localPath, permissions)
 	if err != nil {
 		_ = f.Close()
 		return nil, err
