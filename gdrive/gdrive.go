@@ -649,6 +649,7 @@ func (gd *GDrive) getIdToFile(filename string) (map[string]*File, error) {
 		if err := decoder.Decode(&idToFile); err != nil {
 			return nil, err
 		}
+		f.Close()
 		gd.debug("Done reading file cache from disk")
 	} else {
 		// No metadata available locally; pull the entire history from Drive.
