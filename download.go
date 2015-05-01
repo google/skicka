@@ -36,7 +36,7 @@ import (
 )
 
 func downloadUsage() {
-	fmt.Printf("Usage: skicka download [-ignore-times] [--download-google-apps-files] drive_path local_path\n")
+	fmt.Printf("Usage: skicka download [-ignore-times] [-download-google-apps-files] drive_path local_path\n")
 	fmt.Printf("Run \"skicka help\" for more detailed help text.\n")
 }
 
