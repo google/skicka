@@ -140,7 +140,7 @@ func (f *File) IsFolder() bool {
 // IsGoogleAppsFile returns a boolean indicating whether the given File was created
 // with Google Docs, Google Sheets, etc.
 func (f *File) IsGoogleAppsFile() bool {
-	return strings.HasPrefix(f.MimeType, "application/vnd.google-apps.")
+	return !f.IsFolder() && strings.HasPrefix(f.MimeType, "application/vnd.google-apps.")
 }
 
 // Property represents a user-specified property associated with a Drive
