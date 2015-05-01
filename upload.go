@@ -152,7 +152,7 @@ func syncFileUp(localPath string, stat os.FileInfo, drivePath string, encrypt bo
 		var proplist []gdrive.Property
 		proplist = append(proplist, gdrive.Property{Key: "Permissions",
 			Value: fmt.Sprintf("%#o", stat.Mode()&os.ModePerm)})
-		driveFile, err = gd.CreateFolder(baseName, parentFolder, stat.ModTime(),
+		driveFile, err = gd.CreateFolder(baseName, parentFolder, normalizeModTime(stat.ModTime()),
 			proplist)
 		checkFatalError(err, fmt.Sprintf("%s: create folder", drivePath))
 
@@ -200,7 +200,7 @@ func syncFileUp(localPath string, stat os.FileInfo, drivePath string, encrypt bo
 
 	// Only update the modification time on Google Drive to match the local
 	// modification time after the upload has finished successfully.
-	return gd.UpdateModificationTime(driveFile, stat.ModTime())
+	return gd.UpdateModificationTime(driveFile, normalizeModTime(stat.ModTime()))
 }
 
 // uploadFileContents does its best to upload the local file stored at
@@ -533,8 +533,8 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 	// If it's a directory, once it's created and the permissions and times
 	// are updated (if needed), we're all done.
 	if stat.IsDir() {
-		debug.Printf("%s: updating modification time to %s", drivePath, stat.ModTime())
-		return false, gd.UpdateModificationTime(driveFile, stat.ModTime())
+		debug.Printf("%s: updating modification time to %s", drivePath, normalizeModTime(stat.ModTime()))
+		return false, gd.UpdateModificationTime(driveFile, normalizeModTime(stat.ModTime()))
 	}
 
 	// Compare file sizes.
@@ -553,8 +553,8 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 	}
 
 	// Compare modification times.
-	driveTime := driveFile.ModTime
-	localTime := stat.ModTime()
+	driveTime := normalizeModTime(driveFile.ModTime)
+	localTime := normalizeModTime(stat.ModTime())
 	debug.Printf("localTime: %v, driveTime: %v", localTime, driveTime)
 	timeMatches := localTime.Equal(driveTime)
 	if timeMatches && trustTimes {
@@ -603,8 +603,8 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 	// The timestamp of the local file is different, but the checksums
 	// match, so just update the modified time on Drive and don't upload
 	// the file contents.
-	debug.Printf("%s: updating modification time (#2) to %s", drivePath, stat.ModTime())
-	return false, gd.UpdateModificationTime(driveFile, stat.ModTime())
+	debug.Printf("%s: updating modification time (#2) to %s", drivePath, localTime)
+	return false, gd.UpdateModificationTime(driveFile, localTime)
 }
 
 // Given a path to a file and its FileInfo, follow symlinks starting at the

@@ -280,7 +280,7 @@ func syncLocalFileMetadata(localPath string, f *gdrive.File, nDownloadErrors *in
 		addErrorAndPrintMessage(nDownloadErrors, localPath, err)
 	}
 
-	if err := os.Chtimes(localPath, f.ModTime, f.ModTime); err != nil {
+	if err := os.Chtimes(localPath, normalizeModTime(f.ModTime), normalizeModTime(f.ModTime)); err != nil {
 		addErrorAndPrintMessage(nDownloadErrors, localPath, err)
 	}
 }
@@ -357,7 +357,7 @@ func downloadFile(f *gdrive.File, localPath string, progressBar *pb.ProgressBar)
 
 	verbose.Printf("Downloaded and wrote %d bytes to %s", f.FileSize, localPath)
 
-	return os.Chtimes(localPath, f.ModTime, f.ModTime)
+	return os.Chtimes(localPath, normalizeModTime(f.ModTime), normalizeModTime(f.ModTime))
 }
 
 // Create all of the directories on the local filesystem for the folders in
@@ -475,8 +475,8 @@ func fileNeedsDownload(localPath string, driveFile *gdrive.File,
 		return true, nil
 	}
 
-	driveModificationTime := driveFile.ModTime
-	localModificationTime := stat.ModTime()
+	driveModificationTime := normalizeModTime(driveFile.ModTime)
+	localModificationTime := normalizeModTime(stat.ModTime())
 
 	// If we're trusting modification times to be accurate (the default),
 	// then if the sizes match (as above) and the modification times match,
