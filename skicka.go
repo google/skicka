@@ -226,6 +226,14 @@ func fmtDuration(d time.Duration) string {
 	return str + fmt.Sprintf("%ds", seconds%60)
 }
 
+func normalizeModTime(modTime time.Time) time.Time {
+	// Google Drive supports millisecond resolution for modification time,
+	// but some filesystems (e.g., NTFS) support nanosecond resolution.
+	// We truncate the modification date to the nearest millisecond to avoid
+	// spurious differences when comparing file modification dates.
+	return modTime.UTC().Truncate(time.Millisecond)
+}
+
 // A few values that printFinalStats() uses to do its work
 var startTime = time.Now()
 var syncStartTime time.Time
