@@ -648,7 +648,8 @@ Commands and their options are:
              Google Drive folder to a local directory. If the corresponding
              local file already exists and has the same contents as the its
              Google Drive file, the download is skipped.
-             Arguments: [-ignore-times] drive_path local_path
+             Arguments: [-ignore-times] [-download-google-apps-files]
+                        drive_path local_path
 
   df         Prints the total space used and amount of available space on
              Google Drive.

@@ -958,7 +958,26 @@ func (gd *GDrive) GetFileContents(f *File) (io.ReadCloser, error) {
 	if url == "" {
 		// Google Docs files can't be downloaded directly via DownloadUrl,
 		// but can be exported to another format that can be downloaded.
-		url = driveFile.ExportLinks[driveFile.MimeType]
+
+		// Docs, Sheets, and Slides can be downloaded into .docx, .xls,
+		// and .pptx formats, respectively. This may be a bit confusing since
+		// they won't have that suffix locally.
+		for mt, u := range driveFile.ExportLinks {
+			if strings.HasPrefix(mt, "application/vnd.openxmlformats-officedocument") {
+				url = u
+				break
+			}
+		}
+		// Google Drawings can be downloaded in SVG form.
+		if url == "" {
+			if u, ok := driveFile.ExportLinks["image/svg+xml"]; ok {
+				url = u
+			}
+		}
+		// Otherwise we seem to be out of luck.
+		if url == "" {
+			return nil, fmt.Errorf("%s: unable to download Google Docs file", f.Path)
+		}
 	}
 
 	for try := 0; ; try++ {
