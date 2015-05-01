@@ -21,13 +21,39 @@ package main
 
 import (
 	"fmt"
-	"github.com/google/skicka/gdrive"
 	"os"
-	"path/filepath"
-	"time"
+	"strings"
 )
 
 func df(args []string) int {
-	x, _ := gd.About()
-	fmt.Printf("%s", x)
+	if len(args) != 0 {
+		fmt.Printf("Usage: skicka df\n")
+		fmt.Printf("Run \"skicka help\" for more detailed help text.\n")
+		return 1
+	}
+
+	info, err := gd.GetDriveUsage()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "skicka: %s\n", err)
+		return 1
+	}
+
+	dfItem("Capacity", info.Capacity, 0)
+	sumUsed := int64(0)
+	for _, u := range info.Users {
+		dfItem(u.Name, u.Used, info.Capacity)
+		sumUsed += u.Used
+	}
+	dfItem("Free space", info.Capacity-sumUsed, info.Capacity)
+	return 0
+}
+
+func dfItem(s string, n, total int64) {
+	s = strings.ToUpper(s[0:1]) + strings.ToLower(s[1:])
+	if total != 0 {
+		fmt.Printf("%-10s %s    %5.2f%%\n", s, fmtbytes(n, true),
+			100.*float64(n)/float64(total))
+	} else {
+		fmt.Printf("%-10s %s\n", s, fmtbytes(n, true))
+	}
 }
