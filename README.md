@@ -39,23 +39,8 @@ software.  Bug reports are welcome.
    your `PATH`, or add `$GOPATH/bin` to your `PATH`.
 4. Configure skicka:
    - Run `skicka init` to create a skeleton `~/.skicka.config` file.
-   - Create Google Developer credentials for skicka to use the Google
-   Drive API:
-       - Go to the [Google Developers Console](https://console.developers.google.com/)
-       and select "Create Project".
-       - After the project is created, choose "APIs and Auth" from
-       the menu on the left, and then choose "Credentials". Select the
-       "Create new Client Id" button and choose the "Installed Application"
-       type. Select "Other" as the installed application type.
-       - Copy the text for "client id" and "client secret" to the
-       corresponding entries in your `~/.skicka.config` file.
-       - Now, choose "Consent screen" and set the project name
-         (e.g. to "skicka", and provide an email address). The specific name and
-         email address you choose here doesn't matter; it's only necessary
-         that they be set to something.
-       - Finally, select "APIs" under "APIs and Auth" and enable the "Drive
-       API" for this project.
-   - Get an OAuth2 token: run `skicka ls /`; skicka will print a
+   - Authorize skicka to access your Google Drive files:
+     run `skicka ls /`; skicka will print a
      URL and ask for a token. Go to the URL in a
      browser, log into your Google account (if needed), and give permission
      for the application to access your Google Drive files. After you

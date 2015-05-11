@@ -49,6 +49,8 @@ import (
 
 const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
 
+const clientId = "952282617835-siotrfjbktpinek08hrnspl33d9gho1e.apps.googleusercontent.com"
+
 ///////////////////////////////////////////////////////////////////////////
 
 // TODO: The File representation doesn't quite work in the case where
@@ -284,12 +286,30 @@ func (gd *GDrive) runQuery(query string, process func(*drive.File)) error {
 	}
 }
 
+func (gd *GDrive) getUserAuthorization(config *oauth.Config) error {
+	url := config.AuthCodeURL("state")
+	fmt.Printf("Go to the following link in your browser:\n%v\n", url)
+	fmt.Printf("Enter verification code: ")
+	var code string
+	fmt.Scanln(&code)
+
+	var err error
+	gd.oAuthTransport.Token, err = gd.oAuthTransport.Exchange(code)
+	if err != nil {
+		return err
+	}
+	config.TokenCache.PutToken(gd.oAuthTransport.Token)
+
+	return nil
+}
+
 ///////////////////////////////////////////////////////////////////////////
 // Public Interface
 
 // New returns a pointer to a new GDrive instance. The clientid and
-// clientsecret parameters are Google account credentials, and cacheFile is
-// the path to a file that caches OAuth2 authorization tokens.
+// clientsecret parameters are optional Google account credentials;
+// skicka's clientid is used if these are empty strings.  cacheFile is the
+// path to a file that caches OAuth2 authorization tokens.
 //
 // The uploadBytesPerSecond and downloadBytesPerSecond parameters can be
 // used to specify bandwidth limits if rate-limited uploads or downloads
@@ -299,18 +319,21 @@ func (gd *GDrive) runQuery(query string, process func(*drive.File)) error {
 // used to log debugging information and all HTTP requrests go over the
 // provided RoundTripper.  Finally, metadata about files stored on Drive is
 // cached locally in metadataCacheFilename.
-func New(clientId, clientSecret, cacheFile string,
+func New(userClientId, userClientSecret, cacheFile string,
 	uploadBytesPerSecond, downloadBytesPerSecond int,
 	debug func(s string, args ...interface{}), transport http.RoundTripper,
 	metadataCacheFilename string, quiet bool) (*GDrive, error) {
 	config := &oauth.Config{
-		ClientId:     clientId,
-		ClientSecret: clientSecret,
-		Scope:        "https://www.googleapis.com/auth/drive",
-		RedirectURL:  "urn:ietf:wg:oauth:2.0:oob",
-		AuthURL:      "https://accounts.google.com/o/oauth2/auth",
-		TokenURL:     "https://accounts.google.com/o/oauth2/token",
-		TokenCache:   oauth.CacheFile(cacheFile),
+		ClientId:    clientId,
+		Scope:       "https://www.googleapis.com/auth/drive",
+		RedirectURL: "urn:ietf:wg:oauth:2.0:oob",
+		AuthURL:     "https://accounts.google.com/o/oauth2/auth",
+		TokenURL:    "https://accounts.google.com/o/oauth2/token",
+		TokenCache:  oauth.CacheFile(cacheFile),
+	}
+	if userClientId != "" {
+		config.ClientId = userClientId
+		config.ClientSecret = userClientSecret
 	}
 
 	gd := &GDrive{
@@ -322,22 +345,22 @@ func New(clientId, clientSecret, cacheFile string,
 		quiet: quiet,
 	}
 
-	token, err := config.TokenCache.Token()
-	if err != nil {
-		authURL := config.AuthCodeURL("state")
-		fmt.Printf("Go to the following link in your browser:\n%v\n", authURL)
-		fmt.Printf("Enter verification code: ")
-		var code string
-		fmt.Scanln(&code)
-		token, err = gd.oAuthTransport.Exchange(code)
-		if err != nil {
+	var err error
+	if gd.oAuthTransport.Token, err = config.TokenCache.Token(); err != nil {
+		// No token in the cache; this is likely the first run, so go and
+		// authorize.
+		if err := gd.getUserAuthorization(config); err != nil {
+			return nil, err
+		}
+	} else if err := gd.oAuthTransport.Refresh(); err != nil {
+		// We have a token but got an error from refreshing it; it's likely
+		// that the client id has changed, so also reauthorize.
+		if err := gd.getUserAuthorization(config); err != nil {
 			return nil, err
 		}
 	}
-	gd.oAuthTransport.Token = token
 
-	gd.svc, err = drive.New(gd.oAuthTransport.Client())
-	if err != nil {
+	if gd.svc, err = drive.New(gd.oAuthTransport.Client()); err != nil {
 		return nil, err
 	}
 

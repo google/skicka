@@ -542,8 +542,9 @@ func createConfigFile(filename string) {
 ; https://github.com/google/skicka/blob/master/README.md for more
 ; information about setting up skicka.
 [google]
-	clientid=YOUR_GOOGLE_APP_CLIENT_ID
-	clientsecret=YOUR_GOOGLE_APP_SECRET
+    ;Override the default application client id used by skicka.
+	;clientid=YOUR_GOOGLE_APP_CLIENT_ID
+	;clientsecret=YOUR_GOOGLE_APP_SECRET
     ;An API key may optionally be provided.
     ;apikey=YOUR_API_KEY
 [encryption]
@@ -594,17 +595,11 @@ func checkEncryptionConfig(value string, name string, bytes int) int {
 // while folks are first getting things setup.
 func checkConfigValidity() {
 	nerrs := 0
-	if config.Google.ClientId == "" ||
-		config.Google.ClientId == "YOUR_GOOGLE_APP_CLIENT_ID" {
-		fmt.Fprintf(os.Stderr, "skicka: missing [google]/clientid in "+
-			"configuration file.\n")
-		nerrs++
+	if config.Google.ClientId == "YOUR_GOOGLE_APP_CLIENT_ID" {
+		config.Google.ClientId = ""
 	}
-	if config.Google.ClientSecret == "" ||
-		config.Google.ClientSecret == "YOUR_GOOGLE_APP_SECRET" {
-		fmt.Fprintf(os.Stderr, "skicka: missing [google]/clientsecret in "+
-			"configuration file.\n")
-		nerrs++
+	if config.Google.ClientSecret == "YOUR_GOOGLE_APP_SECRET" {
+		config.Google.ClientSecret = ""
 	}
 
 	// It's ok if the encryption stuff isn't present (if encryption
