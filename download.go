@@ -331,7 +331,9 @@ func getProgressBar(nBytes int64) *pb.ProgressBar {
 }
 
 // Download a single file from Google Drive, saving it to the given path.
-func downloadFile(f *gdrive.File, localPath string, progressBar *pb.ProgressBar) error {
+func downloadFile(f *gdrive.File, localPath string, progressBar *pb.ProgressBar) (err error) {
+	defer func() { err = os.Chtimes(localPath, normalizeModTime(f.ModTime), normalizeModTime(f.ModTime)) }()
+
 	writeCloser, err := getLocalWriterForDriveFile(localPath, f)
 	if err != nil {
 		return err
@@ -357,7 +359,7 @@ func downloadFile(f *gdrive.File, localPath string, progressBar *pb.ProgressBar)
 
 	verbose.Printf("Downloaded and wrote %d bytes to %s", f.FileSize, localPath)
 
-	return os.Chtimes(localPath, normalizeModTime(f.ModTime), normalizeModTime(f.ModTime))
+	return err
 }
 
 // Create all of the directories on the local filesystem for the folders in
