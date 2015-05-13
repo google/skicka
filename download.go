@@ -336,7 +336,6 @@ func downloadFile(f *gdrive.File, localPath string, progressBar *pb.ProgressBar)
 	if err != nil {
 		return err
 	}
-	defer writeCloser.Close()
 
 	// Tee writes to the progress bar, which provides the Writer interface
 	// and updates itself according to the number of bytes that it sees.
@@ -350,11 +349,14 @@ func downloadFile(f *gdrive.File, localPath string, progressBar *pb.ProgressBar)
 	// FIXME: downloadDriveFile needs a name that better distinguishes its
 	// function from downloadFile.
 	if err := downloadDriveFile(multiwriter, f); err != nil {
+		writeCloser.Close()
+
 		// Remove the incomplete file from the failed download.
 		_ = os.Remove(localPath)
 		return err
 	}
 
+	writeCloser.Close()
 	verbose.Printf("Downloaded and wrote %d bytes to %s", f.FileSize, localPath)
 
 	return os.Chtimes(localPath, normalizeModTime(f.ModTime), normalizeModTime(f.ModTime))
