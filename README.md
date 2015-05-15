@@ -37,25 +37,33 @@ software.  Bug reports are welcome.
 2. Download and build skicka: `go get github.com/google/skicka`
 3. Either copy the `skicka` executable in `$GOPATH/bin` to a directory in
    your `PATH`, or add `$GOPATH/bin` to your `PATH`.
-4. Configure skicka:
-   - Run `skicka init` to create a skeleton `~/.skicka.config` file.
-   - Authorize skicka to access your Google Drive files:
-     run `skicka ls /`; skicka will print a
-     URL and ask for a token. Go to the URL in a
-     browser, log into your Google account (if needed), and give permission
-     for the application to access your Google Drive files. After you
-     click 'accept', copy the code from your browser window to the
-     terminal with the "Enter verification code" prompt from skicka.
-     The verification code is stored in the file `~/.skicka.tokencache.json`
-     so that you only need to perform this step once.
-   - If you're going store encrypted files in Google Drive, create an
-     encryption key: set the environment variable `SKICKA_PASSPHRASE`
-     to hold your passphrase and run `skicka genkey`. Copy the lines of
-     text that are printed to the `[encryption]` section of your
-     `~/.skicka.config` file.
-5. Try it out: run `skicka ls -l /`. A list of the files and folders
+4. Run `skicka init` to create a skeleton `~/.skicka.config` file. Various
+   options can be set in this file to control skicka's operation; see
+   comments in the file for more information.
+5. Authorize skicka to access your Google Drive files: run `skicka ls`,
+   and skicka will attempt to open an authorization page in your web
+   browser. Click the "Accept" button to authorize skicka.  You only need
+   to perform this step once.
+   - Alternatively, you can authorize skicka by running `skicka
+     -no-browser-auth ls` and skicka will ask you to visit a URL: go to the
+     URL in a browser, log into your Google account (if needed), and give
+     permission for the application to access your Google Drive
+     files. After you click 'accept', copy the code from your browser
+     window to the terminal with the "Enter verification code" prompt from
+     skicka.
+6. After skicka is authorized, it will download and locally cache
+   information about the files you have stored in Google Drive. This may take
+   a while if you have many files on Drive; a progress indicator will try to
+   keep you posted about how this is going. Once this data is stored
+   locally, future runs of skicka will get going much more quickly.
+7. If you're going store encrypted files in Google Drive, create an
+   encryption key: set the environment variable `SKICKA_PASSPHRASE`
+   to hold your passphrase and run `skicka genkey`. Copy the lines of
+   text that are printed to the `[encryption]` section of your
+   `~/.skicka.config` file.
+8. Try it out: run `skicka ls -l /`. A list of the files and folders
    in the root directory of your Google Drive should be printed.
-6. Join the [mailing list](https://groups.google.com/forum/#!forum/skicka-users)!
+9. Join the [mailing list](https://groups.google.com/forum/#!forum/skicka-users)!
 
 ##Usage
 

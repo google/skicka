@@ -715,6 +715,8 @@ General options valid for all commands:
   -metadata-cache-file <filename>
                          File to store metadata about Google Drive contents.
                          Default: ~/.skicka.metadata.cache
+  -no-browser-auth       Disables attempting to open the authorization URL in a web
+                         browser when initially authorizing skicka to access Google Drive.
   -quiet                 Suppress non-error messages.
   -tokencache <filename> OAuth2 token cache file. Default: ~/.skicka.tokencache.json.
   -verbose               Enable verbose output.
@@ -769,6 +771,8 @@ func main() {
 	qt := flag.Bool("quiet", false, "Suppress non-error messages")
 	dumpHTTP := flag.Bool("dump-http", false, "Dump http traffic")
 	flakyHTTP := flag.Bool("flaky-http", false, "Add flakiness to http traffic")
+	noBrowserAuth := flag.Bool("no-browser-auth", false,
+		"Don't try launching browser for authorization")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -853,7 +857,7 @@ func main() {
 	gd, err = gdrive.New(config.Google.ClientId, config.Google.ClientSecret,
 		*tokenCacheFilename, config.Upload.Bytes_per_second_limit,
 		config.Download.Bytes_per_second_limit, dpf, transport,
-		*metadataCacheFilename, quiet)
+		*metadataCacheFilename, quiet, !*noBrowserAuth)
 	if err != nil {
 		printErrorAndExit(fmt.Errorf("error creating Google Drive "+
 			"client: %v", err))
