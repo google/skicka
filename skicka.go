@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"code.google.com/p/gcfg"
 	"code.google.com/p/go.crypto/pbkdf2"
+	"code.google.com/p/goauth2/oauth"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/md5"
@@ -36,7 +37,9 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -534,6 +537,127 @@ func printUsageAndExit() {
 }
 
 ///////////////////////////////////////////////////////////////////////////
+// OAuth
+
+const clientId = "952282617835-siotrfjbktpinek08hrnspl33d9gho1e.apps.googleusercontent.com"
+
+func getOAuthTransport(tokenCacheFilename string, tryBrowserAuth bool,
+	transport http.RoundTripper) (*oauth.Transport, error) {
+	if config.Google.ApiKey != "" {
+		transport = addKeyTransport{transport: transport, key: config.Google.ApiKey}
+	}
+
+	oauthConfig := &oauth.Config{
+		ClientId:    clientId,
+		Scope:       "https://www.googleapis.com/auth/drive",
+		RedirectURL: "urn:ietf:wg:oauth:2.0:oob",
+		AuthURL:     "https://accounts.google.com/o/oauth2/auth",
+		TokenURL:    "https://accounts.google.com/o/oauth2/token",
+		TokenCache:  oauth.CacheFile(tokenCacheFilename),
+	}
+	if config.Google.ClientId != "" {
+		oauthConfig.ClientId = config.Google.ClientId
+		oauthConfig.ClientSecret = config.Google.ClientSecret
+	}
+
+	tr := &oauth.Transport{
+		Config:    oauthConfig,
+		Transport: transport,
+	}
+
+	var err error
+	if tr.Token, err = oauthConfig.TokenCache.Token(); err != nil {
+		// No token in the cache; this is likely the first run, so go and
+		// authorize.
+		if tr.Token, err = getUserAuthorization(oauthConfig, tr, tryBrowserAuth); err != nil {
+			return nil, err
+		}
+	} else if err := tr.Refresh(); err != nil {
+		// We have a token but got an error from refreshing it; it's likely
+		// that the client id has changed, so also reauthorize.
+		if tr.Token, err = getUserAuthorization(oauthConfig, tr, tryBrowserAuth); err != nil {
+			return nil, err
+		}
+	}
+	oauthConfig.TokenCache.PutToken(tr.Token)
+
+	return tr, nil
+}
+
+func getUserAuthorization(config *oauth.Config, tr *oauth.Transport,
+	tryBrowser bool) (*oauth.Token, error) {
+	var code string
+	var err error
+	if tryBrowser {
+		fmt.Printf("skicka: attempting to launch browser to authorize.\n")
+		fmt.Printf("(Re-run skicka with the -no-browser-auth option to authorize directly.)\n")
+		code, err = tokenFromWeb(config)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		randState := fmt.Sprintf("st%d", time.Now().UnixNano())
+		url := config.AuthCodeURL(randState)
+		fmt.Printf("Go to the following link in your browser:\n%v\n", url)
+		fmt.Printf("Enter verification code: ")
+		fmt.Scanln(&code)
+	}
+
+	return tr.Exchange(code)
+}
+
+func tokenFromWeb(config *oauth.Config) (string, error) {
+	ch := make(chan string)
+	randState := fmt.Sprintf("st%d", time.Now().UnixNano())
+	ts := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/favicon.ico" {
+			http.Error(rw, "", 404)
+			return
+		}
+		if req.FormValue("state") != randState {
+			log.Printf("State doesn't match: req = %#v", req)
+			http.Error(rw, "", 500)
+			return
+		}
+		if code := req.FormValue("code"); code != "" {
+			fmt.Fprintf(rw, "<h1>Success!</h1>Skicka is now authorized.")
+			rw.(http.Flusher).Flush()
+			ch <- code
+			return
+		}
+		http.Error(rw, "", 500)
+	}))
+	defer ts.Close()
+
+	config.RedirectURL = ts.URL
+	authURL := config.AuthCodeURL(randState)
+
+	errs := make(chan error)
+	go func() {
+		err := openURL(authURL)
+		errs <- err
+	}()
+
+	err := <-errs
+	if err == nil {
+		code := <-ch
+		return code, nil
+	}
+	return "", err
+}
+
+func openURL(url string) error {
+	try := []string{"xdg-open", "google-chrome", "open"}
+	for _, bin := range try {
+		err := exec.Command(bin, url).Run()
+		if err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("Error opening URL in browser.")
+}
+
+///////////////////////////////////////////////////////////////////////////
 // main (and its helpers)
 
 // Create an empty configuration file for the user to use as a starting-point.
@@ -823,6 +947,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Set up the basic http.Transport.
 	transport := http.DefaultTransport
 	if tr, ok := transport.(*http.Transport); ok {
 		// Increase the default number of open connections per destination host
@@ -833,15 +958,18 @@ func main() {
 	} else {
 		printErrorAndExit(fmt.Errorf("DefaultTransport not an *http.Transport?"))
 	}
-
 	if *flakyHTTP {
 		transport = newFlakyTransport(transport)
 	}
 	if *dumpHTTP {
 		transport = loggingTransport{transport: transport}
 	}
-	if config.Google.ApiKey != "" {
-		transport = addKeyTransport{transport: transport, key: config.Google.ApiKey}
+
+	// And now upgrade to the OAuth Transport.
+	oauthTransport, err := getOAuthTransport(*tokenCacheFilename, !*noBrowserAuth,
+		transport)
+	if err != nil {
+		printErrorAndExit(fmt.Errorf("error with OAuth2 Authorization: %v ", err))
 	}
 
 	// Update the current active memory statistics every half second.
@@ -853,11 +981,9 @@ func main() {
 		}
 	}()
 
-	var err error
-	gd, err = gdrive.New(config.Google.ClientId, config.Google.ClientSecret,
-		*tokenCacheFilename, config.Upload.Bytes_per_second_limit,
-		config.Download.Bytes_per_second_limit, dpf, transport,
-		*metadataCacheFilename, quiet, !*noBrowserAuth)
+	gd, err = gdrive.New(config.Upload.Bytes_per_second_limit,
+		config.Download.Bytes_per_second_limit, dpf, oauthTransport,
+		*metadataCacheFilename, quiet)
 	if err != nil {
 		printErrorAndExit(fmt.Errorf("error creating Google Drive "+
 			"client: %v", err))

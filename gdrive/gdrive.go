@@ -38,9 +38,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
-	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -50,8 +48,6 @@ import (
 )
 
 const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
-
-const clientId = "952282617835-siotrfjbktpinek08hrnspl33d9gho1e.apps.googleusercontent.com"
 
 ///////////////////////////////////////////////////////////////////////////
 
@@ -288,89 +284,6 @@ func (gd *GDrive) runQuery(query string, process func(*drive.File)) error {
 	}
 }
 
-func (gd *GDrive) getUserAuthorization(config *oauth.Config, tryBrowser bool) error {
-	var code string
-	var err error
-	if tryBrowser {
-		fmt.Printf("skicka: attempting to launch browser to authorize.\n")
-		// The following line is slightly annoying w.r.t. the principle
-		// that the gdrive package should be skicka-independent. Perhaps
-		// the best fix is to hoist the OAuth authorization stuff up into
-		// skicka.go and then require that a valid authorized transport be
-		// passed to gdrive.New.
-		fmt.Printf("(Re-run skicka with the -no-browser-auth option to authorize directly.)\n")
-		code, err = tokenFromWeb(config)
-		if err != nil {
-			return err
-		}
-	} else {
-		randState := fmt.Sprintf("st%d", time.Now().UnixNano())
-		url := config.AuthCodeURL(randState)
-		fmt.Printf("Go to the following link in your browser:\n%v\n", url)
-		fmt.Printf("Enter verification code: ")
-		fmt.Scanln(&code)
-	}
-
-	gd.oAuthTransport.Token, err = gd.oAuthTransport.Exchange(code)
-	if err != nil {
-		return err
-	}
-	config.TokenCache.PutToken(gd.oAuthTransport.Token)
-
-	return nil
-}
-
-func tokenFromWeb(config *oauth.Config) (string, error) {
-	ch := make(chan string)
-	randState := fmt.Sprintf("st%d", time.Now().UnixNano())
-	ts := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		if req.URL.Path == "/favicon.ico" {
-			http.Error(rw, "", 404)
-			return
-		}
-		if req.FormValue("state") != randState {
-			log.Printf("State doesn't match: req = %#v", req)
-			http.Error(rw, "", 500)
-			return
-		}
-		if code := req.FormValue("code"); code != "" {
-			fmt.Fprintf(rw, "<h1>Success!</h1>Skicka is now authorized.")
-			rw.(http.Flusher).Flush()
-			ch <- code
-			return
-		}
-		http.Error(rw, "", 500)
-	}))
-	defer ts.Close()
-
-	config.RedirectURL = ts.URL
-	authURL := config.AuthCodeURL(randState)
-
-	errs := make(chan error)
-	go func() {
-		err := openURL(authURL)
-		errs <- err
-	}()
-
-	err := <-errs
-	if err == nil {
-		code := <-ch
-		return code, nil
-	}
-	return "", err
-}
-
-func openURL(url string) error {
-	try := []string{"xdg-open", "google-chrome", "open"}
-	for _, bin := range try {
-		err := exec.Command(bin, url).Run()
-		if err == nil {
-			return nil
-		}
-	}
-	return fmt.Errorf("Error opening URL in browser.")
-}
-
 ///////////////////////////////////////////////////////////////////////////
 // Public Interface
 
@@ -387,47 +300,16 @@ func openURL(url string) error {
 // used to log debugging information and all HTTP requrests go over the
 // provided RoundTripper.  Finally, metadata about files stored on Drive is
 // cached locally in metadataCacheFilename.
-func New(userClientId, userClientSecret, cacheFile string,
-	uploadBytesPerSecond, downloadBytesPerSecond int,
-	debug func(s string, args ...interface{}), transport http.RoundTripper,
-	metadataCacheFilename string, quiet bool, tryBrowserAuth bool) (*GDrive, error) {
-	config := &oauth.Config{
-		ClientId:    clientId,
-		Scope:       "https://www.googleapis.com/auth/drive",
-		RedirectURL: "urn:ietf:wg:oauth:2.0:oob",
-		AuthURL:     "https://accounts.google.com/o/oauth2/auth",
-		TokenURL:    "https://accounts.google.com/o/oauth2/token",
-		TokenCache:  oauth.CacheFile(cacheFile),
-	}
-	if userClientId != "" {
-		config.ClientId = userClientId
-		config.ClientSecret = userClientSecret
-	}
-
+func New(uploadBytesPerSecond, downloadBytesPerSecond int,
+	debug func(s string, args ...interface{}), oauthTransport *oauth.Transport,
+	metadataCacheFilename string, quiet bool) (*GDrive, error) {
 	gd := &GDrive{
-		oAuthTransport: &oauth.Transport{
-			Config:    config,
-			Transport: transport,
-		},
-		debug: debug,
-		quiet: quiet,
+		oAuthTransport: oauthTransport,
+		debug:          debug,
+		quiet:          quiet,
 	}
 
 	var err error
-	if gd.oAuthTransport.Token, err = config.TokenCache.Token(); err != nil {
-		// No token in the cache; this is likely the first run, so go and
-		// authorize.
-		if err := gd.getUserAuthorization(config, tryBrowserAuth); err != nil {
-			return nil, err
-		}
-	} else if err := gd.oAuthTransport.Refresh(); err != nil {
-		// We have a token but got an error from refreshing it; it's likely
-		// that the client id has changed, so also reauthorize.
-		if err := gd.getUserAuthorization(config, tryBrowserAuth); err != nil {
-			return nil, err
-		}
-	}
-
 	if gd.svc, err = drive.New(gd.oAuthTransport.Client()); err != nil {
 		return nil, err
 	}
@@ -438,7 +320,6 @@ func New(userClientId, userClientSecret, cacheFile string,
 	if err != nil {
 		return nil, err
 	}
-
 	return gd, nil
 }
 
