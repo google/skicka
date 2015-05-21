@@ -23,16 +23,18 @@ import (
 	"bytes"
 	"code.google.com/p/gcfg"
 	"code.google.com/p/go.crypto/pbkdf2"
-	"code.google.com/p/goauth2/oauth"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/google/skicka/gdrive"
+	"golang.org/x/net/context"
+	"golang.org/x/oauth2"
 	"io"
 	"io/ioutil"
 	"log"
@@ -541,74 +543,117 @@ func printUsageAndExit() {
 
 const clientId = "952282617835-siotrfjbktpinek08hrnspl33d9gho1e.apps.googleusercontent.com"
 
-func getOAuthTransport(tokenCacheFilename string, tryBrowserAuth bool,
-	transport http.RoundTripper) (*oauth.Transport, error) {
+func getOAuthClient(tokenCacheFilename string, tryBrowserAuth bool,
+	transport http.RoundTripper) (*http.Client, error) {
 	if config.Google.ApiKey != "" {
 		transport = addKeyTransport{transport: transport, key: config.Google.ApiKey}
 	}
 
-	oauthConfig := &oauth.Config{
-		ClientId:    clientId,
-		Scope:       "https://www.googleapis.com/auth/drive",
+	oauthConfig := &oauth2.Config{
+		ClientID: clientId,
+		Endpoint: oauth2.Endpoint{
+			AuthURL:  "https://accounts.google.com/o/oauth2/auth",
+			TokenURL: "https://accounts.google.com/o/oauth2/token",
+		},
 		RedirectURL: "urn:ietf:wg:oauth:2.0:oob",
-		AuthURL:     "https://accounts.google.com/o/oauth2/auth",
-		TokenURL:    "https://accounts.google.com/o/oauth2/token",
-		TokenCache:  oauth.CacheFile(tokenCacheFilename),
+		Scopes:      []string{"https://www.googleapis.com/auth/drive"},
 	}
 	if config.Google.ClientId != "" {
-		oauthConfig.ClientId = config.Google.ClientId
+		oauthConfig.ClientID = config.Google.ClientId
 		oauthConfig.ClientSecret = config.Google.ClientSecret
 	}
 
-	tr := &oauth.Transport{
-		Config:    oauthConfig,
-		Transport: transport,
-	}
+	// Have the http.Client that oauth2 ends up returning use our
+	// http.RoundTripper (so that -dump-http, etc., all works.)
+	ctx := context.WithValue(oauth2.NoContext, oauth2.HTTPClient,
+		&http.Client{Transport: transport})
 
 	var err error
-	if tr.Token, err = oauthConfig.TokenCache.Token(); err != nil {
-		// No token in the cache; this is likely the first run, so go and
-		// authorize.
-		if tr.Token, err = getUserAuthorization(oauthConfig, tr, tryBrowserAuth); err != nil {
+	var token *oauth2.Token
+	// Try to read a token from the cache.
+	if token, err = readCachedToken(tokenCacheFilename, oauthConfig.ClientID); err != nil {
+		// If no token, or if the token isn't legit, have the user authorize.
+		if token, err = authorizeAndGetToken(oauthConfig, tryBrowserAuth); err != nil {
 			return nil, err
 		}
-	} else if err := tr.Refresh(); err != nil {
-		// We have a token but got an error from refreshing it; it's likely
-		// that the client id has changed, so also reauthorize.
-		if tr.Token, err = getUserAuthorization(oauthConfig, tr, tryBrowserAuth); err != nil {
-			return nil, err
-		}
+		saveToken(tokenCacheFilename, token, oauthConfig.ClientID)
 	}
-	oauthConfig.TokenCache.PutToken(tr.Token)
-
-	return tr, nil
+	return oauthConfig.Client(ctx, token), nil
 }
 
-func getUserAuthorization(config *oauth.Config, tr *oauth.Transport,
-	tryBrowser bool) (*oauth.Token, error) {
+// Structure used for serializing oauth2.Tokens to disk. We also include
+// the oauth2 client id that was used when the token was generated; this
+// allows us to detect when reauthorization is necessary due to a change in
+// client id.
+type token struct {
+	ClientId string
+	oauth2.Token
+}
+
+func readCachedToken(tokenCacheFilename string, clientId string) (*oauth2.Token, error) {
+	b, err := ioutil.ReadFile(tokenCacheFilename)
+	if err != nil {
+		return nil, err
+	}
+
+	var t token
+	if err = json.Unmarshal(b, &t); err != nil {
+		return nil, err
+	}
+	if t.ClientId != clientId {
+		return nil, fmt.Errorf("token client id mismatch")
+	}
+	return &t.Token, nil
+}
+
+// Save the given oauth2.Token to disk so that the user doesn't have to
+// reauthorize skicka next time.
+func saveToken(tokenCacheFilename string, t *oauth2.Token, clientId string) {
+	tok := token{ClientId: clientId, Token: *t}
+
+	var err error
+	var b []byte
+	if b, err = json.Marshal(&tok); err == nil {
+		if err = ioutil.WriteFile(tokenCacheFilename, b, 0600); err == nil {
+			return
+		}
+	}
+	// Report the error but don't exit; we can continue along with the current
+	// command and the user will have to re-authorize next time.
+	fmt.Fprintf(os.Stderr, "skicka: %s: %s", tokenCacheFilename, err)
+}
+
+// Have the user authorize skicka and return the resulting token. tryBrowser
+// controls whether the function tries to open a tab in a web browser or
+// prints instructions to tell the user how to authorize manually.
+func authorizeAndGetToken(oauthConfig *oauth2.Config, tryBrowser bool) (*oauth2.Token, error) {
 	var code string
 	var err error
 	if tryBrowser {
 		fmt.Printf("skicka: attempting to launch browser to authorize.\n")
 		fmt.Printf("(Re-run skicka with the -no-browser-auth option to authorize directly.)\n")
-		code, err = tokenFromWeb(config)
-		if err != nil {
+		if code, err = codeFromWeb(oauthConfig); err != nil {
 			return nil, err
 		}
 	} else {
 		randState := fmt.Sprintf("st%d", time.Now().UnixNano())
-		url := config.AuthCodeURL(randState)
+		url := oauthConfig.AuthCodeURL(randState)
+
 		fmt.Printf("Go to the following link in your browser:\n%v\n", url)
 		fmt.Printf("Enter verification code: ")
 		fmt.Scanln(&code)
 	}
 
-	return tr.Exchange(code)
+	return oauthConfig.Exchange(oauth2.NoContext, code)
 }
 
-func tokenFromWeb(config *oauth.Config) (string, error) {
+// Get an authorization code by opening up the authorization page in a web
+// browser.
+func codeFromWeb(oauthConfig *oauth2.Config) (string, error) {
 	ch := make(chan string)
 	randState := fmt.Sprintf("st%d", time.Now().UnixNano())
+
+	// Launch a local web server to receive the authorization code.
 	ts := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		if req.URL.Path == "/favicon.ico" {
 			http.Error(rw, "", 404)
@@ -629,28 +674,30 @@ func tokenFromWeb(config *oauth.Config) (string, error) {
 	}))
 	defer ts.Close()
 
-	config.RedirectURL = ts.URL
-	authURL := config.AuthCodeURL(randState)
+	oauthConfig.RedirectURL = ts.URL
+	url := oauthConfig.AuthCodeURL(randState)
 
 	errs := make(chan error)
 	go func() {
-		err := openURL(authURL)
+		err := openURL(url)
 		errs <- err
 	}()
 
 	err := <-errs
 	if err == nil {
+		// The URL open was apparently successful; wait for our server to
+		// receive the code and send it back.
 		code := <-ch
 		return code, nil
 	}
 	return "", err
 }
 
+// Attempt to open the given URL in a web browser.
 func openURL(url string) error {
 	try := []string{"xdg-open", "google-chrome", "open"}
 	for _, bin := range try {
-		err := exec.Command(bin, url).Run()
-		if err == nil {
+		if err := exec.Command(bin, url).Run(); err == nil {
 			return nil
 		}
 	}
@@ -965,8 +1012,8 @@ func main() {
 		transport = loggingTransport{transport: transport}
 	}
 
-	// And now upgrade to the OAuth Transport.
-	oauthTransport, err := getOAuthTransport(*tokenCacheFilename, !*noBrowserAuth,
+	// And now upgrade to the OAuth Transport *http.Client.
+	client, err := getOAuthClient(*tokenCacheFilename, !*noBrowserAuth,
 		transport)
 	if err != nil {
 		printErrorAndExit(fmt.Errorf("error with OAuth2 Authorization: %v ", err))
@@ -982,7 +1029,7 @@ func main() {
 	}()
 
 	gd, err = gdrive.New(config.Upload.Bytes_per_second_limit,
-		config.Download.Bytes_per_second_limit, dpf, oauthTransport,
+		config.Download.Bytes_per_second_limit, dpf, client,
 		*metadataCacheFilename, quiet)
 	if err != nil {
 		printErrorAndExit(fmt.Errorf("error creating Google Drive "+

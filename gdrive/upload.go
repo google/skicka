@@ -52,7 +52,7 @@ func (gd *GDrive) UploadFileContents(f *File, contentsReader io.Reader,
 	}
 
 	// And send it off...
-	resp, err := gd.oAuthTransport.RoundTrip(req)
+	resp, err := gd.client.Do(req)
 	if resp != nil {
 		defer googleapi.CloseBody(resp)
 	}
@@ -151,7 +151,7 @@ func (gd *GDrive) getResumableUploadURI(f *drive.File, contentType string,
 
 	for try := 0; ; try++ {
 		gd.debug("Trying to get session URI")
-		resp, err := gd.oAuthTransport.RoundTrip(req)
+		resp, err := gd.client.Do(req)
 		if resp != nil && resp.Body != nil {
 			defer resp.Body.Close()
 		}
@@ -191,7 +191,7 @@ func (gd *GDrive) getCurrentChunkStart(sessionURI string, contentLength int64,
 		req.Header.Set("Content-Length", "0")
 		req.ContentLength = 0
 		req.Header.Set("User-Agent", "skicka/0.1")
-		resp, err := gd.oAuthTransport.RoundTrip(req)
+		resp, err := gd.client.Do(req)
 
 		if resp == nil {
 			gd.debug("get current chunk start err %v", err)
@@ -214,18 +214,6 @@ func (gd *GDrive) getCurrentChunkStart(sessionURI string, contentLength int64,
 			gd.debug("Updated start to %d after 308 from get "+
 				"content-range...", *currentOffset)
 			return Retry, nil
-		} else if resp.StatusCode == http.StatusUnauthorized {
-			gd.debug("Trying OAuth2 token refresh.")
-			for r := 0; r < 6; r++ {
-				if err = gd.oAuthTransport.Refresh(); err == nil {
-					gd.debug("Token refresh success")
-					// Now once again try the PUT...
-					break
-				} else {
-					gd.debug("refresh try %d fail %v", r, err)
-					gd.exponentialBackoff(r, nil, err)
-				}
-			}
 		}
 	}
 	gd.debug("couldn't recover from 503...")
@@ -313,23 +301,6 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
 		return gd.getCurrentChunkStart(*sessionURI, contentLength,
 			currentOffset)
 
-	case resp.StatusCode == http.StatusUnauthorized:
-		// After an hour, the OAuth2 token expires and needs to
-		// be refreshed.
-		gd.debug("Trying OAuth2 token refresh.")
-		for r := 0; r < maxRetries; r++ {
-			if err = gd.oAuthTransport.Refresh(); err == nil {
-				// Successful refresh; make sure we have
-				// the right offset for the next time
-				// around.
-				return gd.getCurrentChunkStart(*sessionURI, contentLength,
-					currentOffset)
-			}
-			gd.debug("Token refresh fail %v", err)
-			gd.exponentialBackoff(r, nil, err)
-		}
-		return Fail, err
-
 	case resp.StatusCode >= 500 && resp.StatusCode <= 599:
 		gd.debug("5xx response")
 		return gd.getCurrentChunkStart(*sessionURI, contentLength, currentOffset)
@@ -401,7 +372,7 @@ func (gd *GDrive) UploadFileContentsResumable(file *File,
 		req.Header.Set("User-Agent", "skicka/0.1")
 
 		// Actually (try to) upload the chunk.
-		resp, err := gd.oAuthTransport.RoundTrip(req)
+		resp, err := gd.client.Do(req)
 
 		status, err := gd.handleResumableUploadResponse(resp, err,
 			file.driveFile(), contentType, contentLength, &try, &currentOffset,

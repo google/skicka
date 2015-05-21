@@ -53,33 +53,20 @@ func (r RetryHTTPTransmitError) Error() string {
 // caller, indicating how it should proceed.
 func (gd *GDrive) handleHTTPResponse(resp *http.Response, err error,
 	try int) HTTPResponseResult {
-	if err == nil && resp != nil && resp.StatusCode >= 200 &&
-		resp.StatusCode <= 299 {
+	switch {
+	case err == nil && resp != nil && (resp.StatusCode/100) == 2: // 2xx response
 		return Success
-	}
-
-	if try == maxRetries {
+	case try == maxRetries:
 		return Fail
+	default:
+		// 403, 500, and 503 error codes come up for transient issues like
+		// hitting the rate limit for Drive SDK API calls, but sometimes we get
+		// other timeouts/connection resets here. Therefore, for all errors, we
+		// sleep (with exponential backoff) and try again a few times before
+		// giving up.
+		gd.exponentialBackoff(try, resp, err)
+		return Retry
 	}
-
-	if resp != nil && resp.StatusCode == http.StatusUnauthorized {
-		// After an hour, the OAuth2 token expires and needs to
-		// be refreshed.
-		gd.debug("Trying OAuth2 token refresh.")
-		if err = gd.oAuthTransport.Refresh(); err == nil {
-			// Success
-			return Retry
-		}
-		// Otherwise fall through to sleep
-	}
-
-	// 403, 500, and 503 error codes come up for transient issues like
-	// hitting the rate limit for Drive SDK API calls, but sometimes we get
-	// other timeouts/connection resets here. Therefore, for all errors, we
-	// sleep (with exponential backoff) and try again a few times before
-	// giving up.
-	gd.exponentialBackoff(try, resp, err)
-	return Retry
 }
 
 func (gd *GDrive) exponentialBackoff(try int, resp *http.Response, err error) {

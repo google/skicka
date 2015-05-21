@@ -27,7 +27,6 @@
 package gdrive
 
 import (
-	"code.google.com/p/goauth2/oauth"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -181,10 +180,10 @@ var ErrMultipleFiles = errors.New("multiple files on Drive")
 // Drive. It provides a variety of methods for working with files and
 // folders stored in Google Drive.
 type GDrive struct {
-	oAuthTransport *oauth.Transport
-	svc            *drive.Service
-	debug          func(s string, args ...interface{})
-	quiet          bool
+	client *http.Client
+	svc    *drive.Service
+	debug  func(s string, args ...interface{})
+	quiet  bool
 	// Mutex that must be held when accessing dirToFiles or pathToFile.
 	metadataMutex sync.Mutex
 	// mapping from directory names to array of File pointers corresponding
@@ -202,12 +201,11 @@ type GDrive struct {
 const maxRetries = 6
 
 // There are a number of cases where the Google Drive API returns an error
-// code but where it's possible to recover from the error; examples include
-// 401 errors when the OAuth2 token expires after an hour, or 403/500 errors
-// when we make too many API calls too quickly and we get a rate limit error.
-// This function takes an error returned by a Drive API call and the number
-// of times that we've tried to call the API entrypoint already and does
-// its best to handle the error.
+// code but where it's possible to recover from the error; examples 403/500
+// errors when we make too many API calls too quickly and we get a rate
+// limit error.  This function takes an error returned by a Drive API call
+// and the number of times that we've tried to call the API entrypoint
+// already and does its best to handle the error.
 //
 // If it thinks the error may be transient, it returns nil, and the caller
 // should try the call again. For unrecoverable errors (or putatively
@@ -220,20 +218,6 @@ func (gd *GDrive) tryToHandleDriveAPIError(err error, try int) error {
 	if try == maxRetries {
 		return err
 	}
-	switch err := err.(type) {
-	case *googleapi.Error:
-		if err.Code == http.StatusUnauthorized {
-			// After an hour, the OAuth2 token expires and needs to
-			// be refreshed.
-			gd.debug("Trying OAuth2 token refresh.")
-			if err := gd.oAuthTransport.Refresh(); err == nil {
-				// Success
-				return nil
-			}
-			// Otherwise fall through to sleep/backoff...
-		}
-	}
-
 	gd.exponentialBackoff(try, nil, err)
 	return nil
 }
@@ -287,10 +271,7 @@ func (gd *GDrive) runQuery(query string, process func(*drive.File)) error {
 ///////////////////////////////////////////////////////////////////////////
 // Public Interface
 
-// New returns a pointer to a new GDrive instance. The clientid and
-// clientsecret parameters are optional Google account credentials;
-// skicka's clientid is used if these are empty strings.  cacheFile is the
-// path to a file that caches OAuth2 authorization tokens.
+// New returns a pointer to a new GDrive instance.
 //
 // The uploadBytesPerSecond and downloadBytesPerSecond parameters can be
 // used to specify bandwidth limits if rate-limited uploads or downloads
@@ -298,19 +279,19 @@ func (gd *GDrive) runQuery(query string, process func(*drive.File)) error {
 //
 // The debug parameter can be used to provide a callback function to be
 // used to log debugging information and all HTTP requrests go over the
-// provided RoundTripper.  Finally, metadata about files stored on Drive is
-// cached locally in metadataCacheFilename.
+// provided http.Client.  Finally, metadata about files stored on
+// Drive is cached locally in metadataCacheFilename.
 func New(uploadBytesPerSecond, downloadBytesPerSecond int,
-	debug func(s string, args ...interface{}), oauthTransport *oauth.Transport,
+	debug func(s string, args ...interface{}), client *http.Client,
 	metadataCacheFilename string, quiet bool) (*GDrive, error) {
 	gd := &GDrive{
-		oAuthTransport: oauthTransport,
-		debug:          debug,
-		quiet:          quiet,
+		debug:  debug,
+		quiet:  quiet,
+		client: client,
 	}
 
 	var err error
-	if gd.svc, err = drive.New(gd.oAuthTransport.Client()); err != nil {
+	if gd.svc, err = drive.New(client); err != nil {
 		return nil, err
 	}
 
@@ -959,7 +940,7 @@ func (gd *GDrive) GetFileContents(f *File) (io.ReadCloser, error) {
 			return nil, err
 		}
 
-		resp, err := gd.oAuthTransport.RoundTrip(request)
+		resp, err := gd.client.Do(request)
 
 		switch gd.handleHTTPResponse(resp, err, try) {
 		case Success:
