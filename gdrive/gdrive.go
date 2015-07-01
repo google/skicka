@@ -548,6 +548,16 @@ func (gd *GDrive) UpdateMetadataCache(filename string) error {
 
 			dir := filepath.Dir(p)
 			gd.dirToFiles[dir] = append(gd.dirToFiles[dir], file)
+
+			if f.IsFolder() {
+				// Make sure that dirToFiles has an entry for the path if
+				// this is a folder. (Normally, this is created along the
+				// way when one of the entries in the folder is processed,
+				// but the folder may be empty...)
+				if _, ok := gd.dirToFiles[p]; !ok {
+					gd.dirToFiles[p] = nil
+				}
+			}
 		}
 	}
 
