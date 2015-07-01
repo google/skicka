@@ -533,7 +533,7 @@ func (gd *GDrive) UpdateMetadataCache(filename string) error {
 		// root directory.  The path is then added to the paths array.
 		var paths []string
 		for _, parentId := range f.ParentIds {
-			getFilePath(f.Path, parentId, idToFile, &paths)
+			gd.getFilePath(f.Path, parentId, idToFile, &paths)
 		}
 		for _, p := range paths {
 			// Create a new File instance for each path where this file is
@@ -664,20 +664,23 @@ outer:
 	return idToFile, nil
 }
 
-func getFilePath(path string, parentId string, idToFile map[string]*File, paths *[]string) {
+func (gd *GDrive) getFilePath(path string, parentId string, idToFile map[string]*File,
+	paths *[]string) {
 	if parentFile, ok := idToFile[parentId]; ok {
 		if len(parentFile.ParentIds) == 0 {
-			// We're at the root, which doesn't have any parents.
-			// Double-check, though.
-			if parentFile.Path != "." {
-				panic(fmt.Sprintf("no parents for file %+v with WIP path %s "+
-					"but parent path isn't \".\"?", parentFile, path))
+			if parentFile.Path == "." {
+				// We're at the root, which doesn't have any parents, so
+				// we've got a legitimage file.
+				*paths = append(*paths, path)
+			} else {
+				// In theory only the root should have no parents, but this
+				// also seems to happen for files that have been trashed.
+				gd.debug("File path %s has no parents! (Trashed?)", path)
 			}
-			*paths = append(*paths, path)
 		} else {
 			for _, grandParentId := range parentFile.ParentIds {
 				newPath := filepath.Join(parentFile.Path, path)
-				getFilePath(newPath, grandParentId, idToFile, paths)
+				gd.getFilePath(newPath, grandParentId, idToFile, paths)
 			}
 		}
 	}
