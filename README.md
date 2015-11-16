@@ -336,7 +336,7 @@ printed out, and should be recorded in the `salt` field of the
 `[encryption]` section of the config file.
 2. The user's passphrase, read from the `SKICKA_PASSPHRASE` environment
 variable, is run through [the PBKDF2 key derivation
-function](https://code.google.com/p/go/source/browse/pbkdf2/pbkdf2.go?repo=crypto),
+function](https://godoc.org/golang.org/x/crypto/pbkdf2),
 using 65536 iterations and the SHA-256 hash function to derive a 64-byte
 hash.
 3. The first 32 bytes of the hash are hex encoded and printed out; they

@@ -21,8 +21,6 @@ package main
 
 import (
 	"bytes"
-	"code.google.com/p/gcfg"
-	"code.google.com/p/go.crypto/pbkdf2"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/md5"
@@ -33,8 +31,10 @@ import (
 	"flag"
 	"fmt"
 	"github.com/google/skicka/gdrive"
+	"golang.org/x/crypto/pbkdf2"
 	"golang.org/x/net/context"
 	"golang.org/x/oauth2"
+	"gopkg.in/gcfg.v1"
 	"io"
 	"io/ioutil"
 	"log"
