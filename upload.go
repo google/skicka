@@ -468,7 +468,7 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 	for _, re := range config.Upload.Ignored_Regexp {
 		match, err := regexp.MatchString(re, localPath)
 		if match == true {
-			fmt.Fprintf(os.Stderr, "skicka: %s: ignoring file, which "+
+			verbose.Printf("skicka: %s: ignoring file, which "+
 				"matches regexp \"%s\".\n", localPath, re)
 			return false, nil
 		}
@@ -737,7 +737,7 @@ func compileUploadFileTree(localPath, drivePath string,
 		if isSymlink(stat) {
 			localPath, stat, err = resolveSymlinks(localPath, stat, &maxSymlinkDepth)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "skicka: %s", err)
+				verbose.Printf("skicka: %s", err)
 				nUploadErrors++
 				return nil, nUploadErrors
 			}

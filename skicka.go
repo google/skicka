@@ -730,6 +730,16 @@ func createConfigFile(filename string) {
         ; line for each such regular expression.
 	;ignored-regexp="\\.o$"
 	;ignored-regexp=~$
+	;ignored-regexp="\\._"
+	;ignored-regexp="RECYCLE\\.BIN"
+	;ignored-regexp="Thumbs\\.db$"
+	;ignored-regexp="\\.git"
+	;ignored-regexp="\\.(mp3|wma|aiff)$"
+	;ignored-regexp="\\.~lock\\..*$"
+	;ignored-regexp="~\\$"
+	;ignored-regexp="\\.DS_Store$"
+    	;ignored-regexp="desktop.ini"
+
 	;
 	; To limit upload bandwidth, you can set the maximum (average)
 	; bytes per second that will be used for uploads
