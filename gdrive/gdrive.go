@@ -48,6 +48,13 @@ import (
 
 const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
 
+// Metadata version history:
+// 1. Initial version: encoded verion, maxChangeId, map[string]*[]File
+// 2. To work around https://github.com/golang/go/issues/13850,
+//    replace the map with an integer count of entries in it and
+//    then that many successive string, *[]File pairs.
+const metadataVersion = 2
+
 ///////////////////////////////////////////////////////////////////////////
 
 // TODO: The File representation doesn't quite work in the case where
@@ -417,7 +424,7 @@ func (gd *GDrive) saveMetadataCache(filename string, maxChangeId int64,
 	e := gob.NewEncoder(f)
 
 	// First goes the metadata verion number.
-	version := 1
+	version := metadataVersion
 	if err := e.Encode(version); err != nil {
 		return err
 	}
@@ -425,10 +432,20 @@ func (gd *GDrive) saveMetadataCache(filename string, maxChangeId int64,
 	if err := e.Encode(maxChangeId); err != nil {
 		return err
 	}
-	// Next goes the serialized map from strings to File structures.
-	if err := e.Encode(m); err != nil {
+	// Next the number of elements in the map.
+	if err := e.Encode(len(m)); err != nil {
 		return err
 	}
+	// Finally, each of the entries in the map.
+	for k, v := range m {
+		if err := e.Encode(k); err != nil {
+			return err
+		}
+		if err := e.Encode(*v); err != nil {
+			return err
+		}
+	}
+
 	// Make sure it has all successfully landed on disk.
 	if err := f.Sync(); err != nil {
 		return err
@@ -592,9 +609,14 @@ func (gd *GDrive) getIdToFile(filename string) (map[string]*File, error) {
 		if err := decoder.Decode(&version); err != nil {
 			return nil, err
 		}
-		if version != 1 {
-			return nil, fmt.Errorf("metadata file version %d unknown to this version"+
-				"of skicka", version)
+		if version <= 0 {
+			return nil, fmt.Errorf("%s: invalid metadata file version %d",
+				filename, version)
+		}
+		if version > metadataVersion {
+			return nil, fmt.Errorf("%s: metadata file version %d newer than "+
+				"latest version supported in this version of skicka (%d)."+
+				"Try upgrading.", filename, version, metadataVersion)
 		}
 
 		if err := decoder.Decode(&maxChangeId); err != nil {
@@ -609,8 +631,31 @@ func (gd *GDrive) getIdToFile(filename string) (map[string]*File, error) {
 		go gd.getMetadataChanges(gd.svc, maxChangeId, changeChan, errorChan)
 
 		// Read the rest of the metadata.
-		if err := decoder.Decode(&idToFile); err != nil {
-			return nil, err
+		switch version {
+		case 1:
+			if err := decoder.Decode(&idToFile); err != nil {
+				return nil, err
+			}
+
+		case 2:
+			var count int
+			if err := decoder.Decode(&count); err != nil {
+				return nil, err
+			}
+			for i := 0; i < count; i += 1 {
+				var id string
+				if err := decoder.Decode(&id); err != nil {
+					return nil, err
+				}
+				var file *File = new(File)
+				if err := decoder.Decode(file); err != nil {
+					return nil, err
+				}
+				idToFile[id] = file
+			}
+
+		default:
+			panic("unhandled version reading metadata")
 		}
 		f.Close()
 		gd.debug("Done reading file cache from disk")
