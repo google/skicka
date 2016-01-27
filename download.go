@@ -36,7 +36,8 @@ import (
 )
 
 func downloadUsage() {
-	fmt.Printf("Usage: skicka download [-ignore-times] [-download-google-apps-files] drive_path local_path\n")
+	fmt.Printf("Usage: skicka download [-ignore-times] [-dry-run] [-download-google-apps-files]\n")
+	fmt.Printf("       drive_path local_path\n")
 	fmt.Printf("Run \"skicka help\" for more detailed help text.\n")
 }
 
@@ -44,11 +45,14 @@ func download(args []string) int {
 	var drivePath, localPath string
 	ignoreTimes := false
 	downloadGoogleAppsFiles := false
+	dryRun := false
 	for i := 0; i < len(args); i++ {
 		if args[i] == "-ignore-times" {
 			ignoreTimes = true
 		} else if args[i] == "-download-google-apps-files" {
 			downloadGoogleAppsFiles = true
+		} else if args[i] == "-dry-run" {
+			dryRun = true
 		} else if drivePath == "" {
 			drivePath = filepath.Clean(args[i])
 		} else if localPath == "" {
@@ -80,7 +84,8 @@ func download(args []string) int {
 	var errs int
 	if files[0].IsFolder() {
 		// Download a folder from Drive to the local system.
-		errs = syncHierarchyDown(drivePath, localPath, trustTimes, downloadGoogleAppsFiles)
+		errs = syncHierarchyDown(drivePath, localPath, trustTimes,
+			downloadGoogleAppsFiles, dryRun)
 	} else {
 		// Only download a single file.
 		stat, err := os.Stat(localPath)
@@ -93,7 +98,7 @@ func download(args []string) int {
 		if !downloadGoogleAppsFiles && files[0].IsGoogleAppsFile() {
 			message("%s: skipping Google Apps file.", files[0].Path)
 		} else {
-			err = syncOneFileDown(files[0], localPath, trustTimes)
+			err = syncOneFileDown(files[0], localPath, trustTimes, dryRun)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "skicka: %s: %s\n", drivePath, err)
 				errs++
@@ -107,7 +112,8 @@ func download(args []string) int {
 
 // Synchronize a single file from Google Drive to the local file system at
 // `localPath`.
-func syncOneFileDown(file *gdrive.File, localPath string, trustTimes bool) error {
+func syncOneFileDown(file *gdrive.File, localPath string, trustTimes bool,
+	dryRun bool) error {
 	needsDownload, err := fileNeedsDownload(localPath, file, trustTimes)
 	if err != nil {
 		return fmt.Errorf("%s: error determining if file needs "+
@@ -115,6 +121,10 @@ func syncOneFileDown(file *gdrive.File, localPath string, trustTimes bool) error
 	}
 
 	if needsDownload {
+		if dryRun {
+			fmt.Printf("%s -> %s (%d bytes)\n", file.Path, localPath, file.FileSize)
+			return nil
+		}
 		pb := getProgressBar(file.FileSize)
 		if pb != nil {
 			defer pb.Finish()
@@ -133,7 +143,7 @@ func syncOneFileDown(file *gdrive.File, localPath string, trustTimes bool) error
 
 // Synchronize an entire folder hierarchy from Drive to a local directory.
 func syncHierarchyDown(driveBasePath string, localBasePath string, trustTimes bool,
-	downloadGoogleAppsFiles bool) int {
+	downloadGoogleAppsFiles bool, dryRun bool) int {
 	// First, make sure the user isn't asking us to download a directory on
 	// top of a file.
 	if stat, err := os.Stat(localBasePath); err == nil && !stat.IsDir() {
@@ -176,6 +186,17 @@ func syncHierarchyDown(driveBasePath string, localBasePath string, trustTimes bo
 	// Google Drive. This map is indexed by the path of the Google Drive
 	// file.
 	localPathMap := createPathMap(uniqueDriveFiles, localBasePath, driveBasePath)
+
+	if dryRun {
+		var totalBytes int64
+		for _, f := range uniqueDriveFiles {
+			fmt.Printf("%s -> %s (%d bytes)\n", f.Path, localPathMap[f.Path],
+				f.FileSize)
+			totalBytes += f.FileSize
+		}
+		fmt.Printf("Total bytes %d\n", totalBytes)
+		return 0
+	}
 
 	// First create all of the local directories, so that the downloaded
 	// files have somewhere to land.  For any already-existing directories,

@@ -1,6 +1,6 @@
 //
 // skicka.go
-// Copyright(c)2014-2015 Google, Inc.
+// Copyright(c)2014-2016 Google, Inc.
 //
 // Tool for transferring files to/from Google Drive and related operations.
 //
@@ -857,12 +857,12 @@ Commands and their options are:
 
   ls         List the files and directories in the given Google Drive folder.
              Arguments: [-d, -l, -ll, -r] [drive_path ...],
-             where -l and -ll specify long (including sizes and update times)
-             and really long output (also including MD5 checksums), respectively.
-             The -r argument causes ls to recursively list all files in the
-             hierarchy rooted at the base directory, and -d causes directories
-             specified on the command line to be listed as files (i.e., their
-             contents aren't listed.)
+             where -l and -ll specify long (including sizes and update
+             times) and really long output (also including MD5 checksums),
+             respectively.  The -r argument causes ls to recursively list
+             all files in the hierarchy rooted at the base directory, and
+             -d causes directories specified on the command line to be
+             listed as files (i.e., their contents aren't listed.)
 
   mkdir      Create a new directory (folder) at the given Google Drive path.
              Arguments: [-p] drive_path ...,
@@ -871,23 +871,27 @@ Commands and their options are:
 
   rm	     Remove a file or directory at the given Google Drive path.
              Arguments: [-r, -s] drive_path ...,
-             where files and directories are recursively removed if -r is specified
-             and the google drive trash is skipped if -s is specified. The default 
-             behavior is to fail if the drive path specified is a directory and -r is
-             not specified, and to send files to the trash instead of permanently
-             deleting them.
+             where files and directories are recursively removed if -r is
+             specified and the google drive trash is skipped if -s is
+             specified. The default behavior is to fail if the drive path
+             specified is a directory and -r is not specified, and to send
+             files to the trash instead of permanently deleting them.
 
   upload     Uploads all files in the local directory and its children to the
              given Google Drive path. Skips files that have already been
              uploaded.
-             Arguments: [-ignore-times] [-encrypt] [-follow-symlinks <maxdepth>] local_path drive_path
+             Arguments: [-ignore-times] [-encrypt] [-follow-symlinks <maxdepth>]
+                        local_path drive_path
 
 Options valid for both "upload" and "download":
-  -ignore-times    Normally, skicka assumes that if the timestamp of a local file
-                   matches the timestamp of the file on Drive and the files have
-                   the same size, then it isn't necessary to confirm that the
-                   file contents match. The -ignore-times flag can be used to
-                   force checking file contents in this case.
+  -dry-run         Don't actually upload or download, but print the paths of
+                   all files that would be transferred.
+  -ignore-times    Normally, skicka assumes that if the timestamp of a local
+                   file matches the timestamp of the file on Drive and the
+                   files have the same size, then it isn't necessary to
+                   confirm that the file contents match. The -ignore-times
+                   flag can be used to force checking file contents in this
+                   case.
 
 General options valid for all commands:
   -config <filename>     General skicka configuration file. Default: ~/.skicka.config.

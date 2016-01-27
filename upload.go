@@ -37,13 +37,15 @@ import (
 )
 
 func uploadUsage() {
-	fmt.Printf("Usage: skicka upload [-ignore-times] [-encrypt] [-follow-symlinks <maxdepth>] local_path drive_path\n")
+	fmt.Printf("Usage: skicka upload [-ignore-times] [-encrypt] [-follow-symlinks <maxdepth>]\n")
+	fmt.Printf("       [-dry-run] local_path drive_path\n")
 	fmt.Printf("Run \"skicka help\" for more detailed help text.\n")
 }
 
 func upload(args []string) int {
 	ignoreTimes := false
 	encrypt := false
+	dryRun := false
 
 	if len(args) < 2 {
 		uploadUsage()
@@ -58,6 +60,8 @@ func upload(args []string) int {
 			ignoreTimes = true
 		case "-encrypt":
 			encrypt = true
+		case "-dry-run":
+			dryRun = true
 		case "-follow-symlinks":
 			var err error
 			maxSymlinkDepth, err = strconv.Atoi(args[i+1])
@@ -102,7 +106,7 @@ func upload(args []string) int {
 
 	syncStartTime = time.Now()
 	errs := syncHierarchyUp(localPath, drivePath, encrypt, trustTimes,
-		maxSymlinkDepth)
+		maxSymlinkDepth, dryRun)
 	printFinalStats()
 
 	return errs
@@ -280,15 +284,26 @@ func uploadFileContents(localPath string, driveFile *gdrive.File, encrypt bool,
 // localPath is the file or directory to start with, driveRoot is
 // the directory into which the file/directory will be sent
 func syncHierarchyUp(localPath string, driveRoot string, encrypt bool, trustTimes bool,
-	maxSymlinkDepth int) int {
+	maxSymlinkDepth int, dryRun bool) int {
 	if encrypt && key == nil {
 		key = decryptEncryptionKey()
 	}
 
 	fileMappings, nUploadErrors := compileUploadFileTree(localPath, driveRoot,
-		encrypt, trustTimes, maxSymlinkDepth)
+		encrypt, trustTimes, maxSymlinkDepth, dryRun)
 	if len(fileMappings) == 0 {
 		message("No files to be uploaded.")
+		return 0
+	}
+
+	if dryRun {
+		var totalSize int64
+		for _, f := range fileMappings {
+			fmt.Printf("%s -> %s (%d bytes)\n", f.LocalPath, f.DrivePath,
+				f.LocalFileInfo.Size())
+			totalSize += f.LocalFileInfo.Size()
+		}
+		fmt.Printf("Total bytes %d\n", totalSize)
 		return 0
 	}
 
@@ -462,7 +477,7 @@ func isSymlink(stat os.FileInfo) bool {
 // Starts with the efficient checks that may be able to let us quickly
 // determine one way or the other before going to the more expensive ones.
 func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
-	encrypt, trustTimes bool) (bool, error) {
+	encrypt, trustTimes bool, dryRun bool) (bool, error) {
 	// Don't upload if the filename matches one of the regular expressions
 	// of files to ignore.
 	for _, re := range config.Upload.Ignored_Regexp {
@@ -515,26 +530,33 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 			localPath, drivePath)
 	}
 
-	// With that check out of the way, take the opportunity to make sure
-	// the file has all of the properties that we expect.
-	if err := createMissingProperties(driveFile, stat.Mode(), encrypt); err != nil {
-		debug.Printf("%s: error creating properties: %s", driveFile, err)
-		return false, err
-	}
+	// FIXME: a function named "fileNeedsUpload()" shouldn't be messing
+	// around with creating properties, upading modification times, etc.;
+	// all this should happen in a more appropriate place, so we don't need
+	// to plumb through and pay attention to whether we're doing a dry run
+	// here.
+	if !dryRun {
+		// With that check out of the way, take the opportunity to make sure
+		// the file has all of the properties that we expect.
+		if err := createMissingProperties(driveFile, stat.Mode(), encrypt); err != nil {
+			debug.Printf("%s: error creating properties: %s", driveFile, err)
+			return false, err
+		}
 
-	// Go ahead and update the file's permissions if they've changed.
-	bitsString := fmt.Sprintf("%#o", stat.Mode()&os.ModePerm)
-	debug.Printf("%s: updating permissions to %s", drivePath, bitsString)
-	if err := gd.UpdateProperty(driveFile, "Permissions", bitsString); err != nil {
-		debug.Printf("%s: error updating permissions properties: %s", driveFile, err)
-		return false, err
-	}
+		// Go ahead and update the file's permissions if they've changed.
+		bitsString := fmt.Sprintf("%#o", stat.Mode()&os.ModePerm)
+		debug.Printf("%s: updating permissions to %s", drivePath, bitsString)
+		if err := gd.UpdateProperty(driveFile, "Permissions", bitsString); err != nil {
+			debug.Printf("%s: error updating permissions properties: %s", driveFile, err)
+			return false, err
+		}
 
-	// If it's a directory, once it's created and the permissions and times
-	// are updated (if needed), we're all done.
-	if stat.IsDir() {
-		debug.Printf("%s: updating modification time to %s", drivePath, normalizeModTime(stat.ModTime()))
-		return false, gd.UpdateModificationTime(driveFile, normalizeModTime(stat.ModTime()))
+		// If it's a directory, once it's created and the permissions and times
+		// are updated (if needed), we're all done.
+		if stat.IsDir() {
+			debug.Printf("%s: updating modification time to %s", drivePath, normalizeModTime(stat.ModTime()))
+			return false, gd.UpdateModificationTime(driveFile, normalizeModTime(stat.ModTime()))
+		}
 	}
 
 	// Compare file sizes.
@@ -603,6 +625,9 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 	// The timestamp of the local file is different, but the checksums
 	// match, so just update the modified time on Drive and don't upload
 	// the file contents.
+	if dryRun {
+		return false, nil
+	}
 	debug.Printf("%s: updating modification time (#2) to %s", drivePath, localTime)
 	return false, gd.UpdateModificationTime(driveFile, localTime)
 }
@@ -639,7 +664,7 @@ func resolveSymlinks(path string, stat os.FileInfo, maxSymlinkDepth *int) (strin
 // encountered, determine if the file needs to be uploaded. If so, an entry
 // is added to the returned localToRemoteFileMapping array.
 func walkPathForUploads(localPath, drivePath string, encrypt,
-	trustTimes bool, maxSymlinkDepth int) ([]localToRemoteFileMapping, int32) {
+	trustTimes bool, maxSymlinkDepth int, dryRun bool) ([]localToRemoteFileMapping, int32) {
 	var fileMappings []localToRemoteFileMapping
 	nErrs := int32(0)
 
@@ -673,7 +698,7 @@ func walkPathForUploads(localPath, drivePath string, encrypt,
 			// the maxDepth passed in accounts for the number of links we
 			// followed to get to this point.
 			mappings, ne := walkPathForUploads(path, drivePath, encrypt,
-				trustTimes, maxDepth)
+				trustTimes, maxDepth, dryRun)
 			fileMappings = append(fileMappings, mappings...)
 			nErrs += ne
 			return nil
@@ -683,7 +708,8 @@ func walkPathForUploads(localPath, drivePath string, encrypt,
 			drivePath += encryptionSuffix
 		}
 
-		upload, err := fileNeedsUpload(path, drivePath, stat, encrypt, trustTimes)
+		upload, err := fileNeedsUpload(path, drivePath, stat, encrypt, trustTimes,
+			dryRun)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "skicka: %s\n", err)
 			nErrs++
@@ -706,7 +732,7 @@ func walkPathForUploads(localPath, drivePath string, encrypt,
 }
 
 func compileUploadFileTree(localPath, drivePath string,
-	encrypt, trustTimes bool, maxSymlinkDepth int) ([]localToRemoteFileMapping, int32) {
+	encrypt, trustTimes bool, maxSymlinkDepth int, dryRun bool) ([]localToRemoteFileMapping, int32) {
 	// Walk the local directory hierarchy starting at 'localPath' and build
 	// an array of files that may need to be synchronized.
 	nUploadErrors := int32(0)
@@ -745,7 +771,7 @@ func compileUploadFileTree(localPath, drivePath string,
 
 		var fileMappings []localToRemoteFileMapping
 		upload, err := fileNeedsUpload(localPath, drivePath, stat,
-			encrypt, trustTimes)
+			encrypt, trustTimes, dryRun)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "skicka: %s", err)
 			nUploadErrors++
@@ -758,7 +784,7 @@ func compileUploadFileTree(localPath, drivePath string,
 
 	message("Getting list of local files... ")
 	fileMappings, nErrs := walkPathForUploads(localPath, drivePath, encrypt,
-		trustTimes, maxSymlinkDepth)
+		trustTimes, maxSymlinkDepth, dryRun)
 	nUploadErrors += nErrs
 	message("Done.")
 
