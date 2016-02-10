@@ -182,6 +182,18 @@ func syncHierarchyDown(driveBasePath string, localBasePath string, trustTimes bo
 		uniqueDriveFiles = files
 	}
 
+	// Warn that we're going to ignore any files that have slashes in their
+	// names.
+	var files []*gdrive.File
+	for _, f := range uniqueDriveFiles {
+		if f.PathHasSlash() {
+			message("%s: skipping file with slash in filename", f.Path)
+		} else {
+			files = append(files, f)
+		}
+	}
+	uniqueDriveFiles = files
+
 	// Create a map that stores the local filename to use for each file in
 	// Google Drive. This map is indexed by the path of the Google Drive
 	// file.

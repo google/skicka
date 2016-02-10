@@ -69,6 +69,8 @@ const metadataVersion = 2
 type File struct {
 	// Path name on Drive. Does not start with a slash.
 	Path string
+	// Indicates whether the original file name in Drive had a slash in it.
+	pathHasSlash bool
 	// Size of the file in bytes.
 	FileSize int64
 	// Unique id of the file (that persists over file modifications,
@@ -135,6 +137,10 @@ func (f *File) driveFile() *drive.File {
 		Parents:      parents,
 		Properties:   convertProplist(f.Properties),
 	}
+}
+
+func (f *File) PathHasSlash() bool {
+	return f.pathHasSlash
 }
 
 // IsFolder returns a boolean indicating whether the given File is a
@@ -559,11 +565,15 @@ func (gd *GDrive) UpdateMetadataCache(filename string) error {
 			// declaration for an issue with this approach, though.
 			file := new(File)
 			*file = *f
+			file.pathHasSlash = strings.ContainsRune(f.Path, '/')
 			file.Path = p
 
 			gd.pathToFile[p] = append(gd.pathToFile[p], file)
 
-			dir := filepath.Dir(p)
+			// Explicitly trim off the file's name to get the path, rather
+			// than using filepath.Dir(), so that if there is a slash in
+			// the filename, we still get the expected result.
+			dir := filepath.Clean(strings.TrimSuffix(p, f.Path))
 			gd.dirToFiles[dir] = append(gd.dirToFiles[dir], file)
 
 			if f.IsFolder() {
