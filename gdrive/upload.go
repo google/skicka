@@ -95,7 +95,6 @@ func prepareUploadPUT(id string, contentsReader io.Reader,
 	}
 
 	req, _ := http.NewRequest("PUT", urls, contentsReader)
-	googleapi.SetOpaque(req.URL)
 	req.ContentLength = length
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("User-Agent", "skicka/0.1")
