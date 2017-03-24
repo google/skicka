@@ -21,10 +21,11 @@ package main
 
 import (
 	"fmt"
-	"github.com/google/skicka/gdrive"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/google/skicka/gdrive"
 )
 
 func getPermissionsAsString(driveFile *gdrive.File) (string, error) {
@@ -156,7 +157,7 @@ func lsFile(f *gdrive.File, recursive, long, longlong bool) {
 		return
 	}
 
-	synctime := f.ModTime
+	synctime := f.ModTime.Local()
 	permString, _ := getPermissionsAsString(f)
 	if longlong {
 		md5 := f.Md5
