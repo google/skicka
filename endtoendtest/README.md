@@ -1,4 +1,4 @@
-#endtoendtest
+# endtoendtest
 
 This is a small utility for end to end testing of skicka.  It creates a
 small hierarchy of files in a temporary directory on the local disk,

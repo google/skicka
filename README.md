@@ -1,10 +1,10 @@
-#skicka
+# skicka
 
 Utility for working with files and folders stored on Google Drive.
 
 Note: skicka is not an official Google product!
 
-##Intro
+## Intro
 
 skicka makes it easy to copy files to and from Google Drive and to work with
 files stored on Google Drive.
@@ -20,7 +20,7 @@ folders, compute the space used by Drive folders, and copy files between
 your computer to Google Drive.  If you'd like to encrypt your files before
 uploading them, skicka supports AES-256 encryption.
 
-###What skicka is not
+### What skicka is not
 
 skicka is not a general solution for automatically synchronizing files
 stored in Google Drive across multiple machines. In particular, it doesn't
@@ -31,7 +31,7 @@ Furthermore, although skicka has been robust in usage so far and has
 no known data corruption bugs, it should for now be treated as "alpha"
 software.  Bug reports are welcome.
 
-##Getting Started
+## Getting Started
 
 1. You must have a [Go](http://golang.org) compiler installed.
 2. Download and build skicka: `go get github.com/google/skicka`
@@ -65,7 +65,7 @@ software.  Bug reports are welcome.
    in the root directory of your Google Drive should be printed.
 9. Join the [mailing list](https://groups.google.com/forum/#!forum/skicka-users)!
 
-##Usage
+## Usage
 
 For a general overview of skicka's commands, run `skicka help`.
 
@@ -177,22 +177,22 @@ Finally, there is a `fsck` command that checks the file system on Google
 Drive for problems and verifies that the local cache of file metadata is
 in-sync with the files stored on Drive.
 
-##FAQs
+## FAQs
 
-###Can skicka work with Google Drive files that it didn't create itself?
+### Can skicka work with Google Drive files that it didn't create itself?
 
 Yes.  The only limitations are that regular Google Drive files don't store
 the Unix permissions or the local modification of the original file when it
 was uploaded.  Therefore, in this case `skicka download` uses 644
 permissions for files it creates and 755 permissions for directories.
 
-###skicka ls -l indicates that a file has world-readable permissions on Google Drive; does this mean anyone can access it?
+### skicka ls -l indicates that a file has world-readable permissions on Google Drive; does this mean anyone can access it?
 
 No.  Those permissions are only used to set the local file permissions when
 the file is downloaded with `skicka download`. The access permissions for
 the files stored on Drive are handled with Drive's regular mechanisms.
 
-###How can I speed up uploads?
+### How can I speed up uploads?
 
 There's a fixed per-file overhead for each file uploaded to Google Drive
 that limits skicka to creating roughly five files a second; if files are
@@ -202,7 +202,7 @@ transferring the contents of the files.
 If the uploaded files don't need to be accessed individually, creating a
 `tar` or `zip` archive of them before uploading may help in this case.
 
-###I occasionally see "operation timed out" or "broken pipe" errors when uploading; what's going on?
+### I occasionally see "operation timed out" or "broken pipe" errors when uploading; what's going on?
 
 A variety of transient errors can happen when using RESTful APIs like the
 Google Drive API.  When these errors are encountered, skicka makes a number
@@ -217,7 +217,7 @@ If you do see these errors, re-run the operation you were performing; any
 files that weren't transferred the first time should be taken care of with
 a second run.
 
-###Does skicka support rate-limited uploads and downloads?
+### Does skicka support rate-limited uploads and downloads?
 
 Yes. By default, skicka doesn't try to limit its bandwidth usage.  However,
 if you add a line `bytes-per-second-limit=...` to the `[upload]` or
@@ -228,17 +228,17 @@ respectively.
 If this line isn't present (or has a value of zero), then bandwidth won't
 be limited.
 
-###Can an http proxy be used with skicka?
+### Can an http proxy be used with skicka?
 
 Yes--just set the `HTTP_PROXY` environment variable appropriately.
 
-###"skicka"?!?
+### "skicka"?!?
 
 Swedish, "to send".
 
-##Implementation notes
+## Implementation notes
 
-###How files are stored in Google Drive
+### How files are stored in Google Drive
 
 When a directory hierarchy is uploaded, Google Drive file is created for
 each local file and a Google Drive folder is created for each local
@@ -250,7 +250,7 @@ property, stored as a string with the octal file permissions.
 See the discussion of encryption below for details about how encrypted
 files are represented.
 
-###Synchronization algorithm
+### Synchronization algorithm
 
 When deciding if a local file needs to be uploaded to Google Drive,
 skicka performs the following checks.
@@ -289,7 +289,7 @@ downloaded. The `-ignore-times` option can also be used to bypass the file
 modification time check and to force a comparison of file contents to
 decide whether to download.
 
-###Encryption
+### Encryption
 
 If the `-encrypt` flag is provided to the `upload` command, skicka will
 encrypt the contents of each file before uploading it to Google Drive.
@@ -324,7 +324,7 @@ file sizes, for example.  If this is problematic for your usage, you should
 probably use `tar` or `zip` to put the files you want to encrypt into a
 single file before uploading it.
 
-####Key generation and storage
+#### Key generation and storage
 
 When `skicka genkey` is executed, an encryption key is generated as
 follows:
