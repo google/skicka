@@ -18,7 +18,6 @@
 package gdrive
 
 import (
-	"bytes"
 	"fmt"
 	"google.golang.org/api/drive/v2"
 	"google.golang.org/api/googleapi"
@@ -89,45 +88,15 @@ func prepareUploadPUT(id string, contentsReader io.Reader,
 		url.QueryEscape(id))
 	urls += "?" + params.Encode()
 
-	contentsReader, contentType, err := detectContentType(contentsReader)
-	if err != nil {
-		return nil, err
-	}
-
 	req, _ := http.NewRequest("PUT", urls, contentsReader)
 	req.ContentLength = length
-	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("User-Agent", "skicka/0.1")
 
 	return req, nil
 }
 
-func detectContentType(contentsReader io.Reader) (io.Reader, string, error) {
-	// Grab the start of the contents so that we can try to identify
-	// the content type.
-	contentsHeader := make([]byte, 512)
-	headerLength, err := contentsReader.Read(contentsHeader)
-	if err != nil {
-		if err.Error() == "EOF" {
-			// Empty file; this is fine, and we're done.
-			return nil, "", nil
-		}
-		return nil, "", err
-	}
-	contentType := http.DetectContentType(contentsHeader)
-
-	// Reconstruct a new Reader that returns the same byte stream
-	// as the original one, effectively pasting the bytes we read for
-	// the content-type identification to the start of what remains in
-	// the original io.Reader.
-	contentsReader = io.MultiReader(bytes.NewReader(contentsHeader[:headerLength]),
-		contentsReader)
-
-	return contentsReader, contentType, nil
-}
-
-func (gd *GDrive) getResumableUploadURI(f *drive.File, contentType string,
-	length int64) (string, error) {
+func (gd *GDrive) getResumableUploadURI(f *drive.File, length int64) (string, error) {
 	params := make(url.Values)
 	params.Set("uploadType", "resumable")
 
@@ -142,7 +111,7 @@ func (gd *GDrive) getResumableUploadURI(f *drive.File, contentType string,
 
 	req, _ := http.NewRequest("PUT", urls, body)
 	req.Header.Set("X-Upload-Content-Length", fmt.Sprintf("%d", length))
-	req.Header.Set("X-Upload-Content-Type", contentType)
+	req.Header.Set("X-Upload-Content-Type", "application/octet-stream")
 	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
 	req.Header.Set("User-Agent", "skicka/0.1")
 	// We actually don't need any content in the request, since we're
@@ -242,7 +211,7 @@ func updateStartFromResponse(resp *http.Response) (int64, error) {
 // offset into the file being uploaded, and *sessionURI, the URI to which
 // chunks for the file should be uploaded to.
 func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
-	f *drive.File, contentType string, contentLength int64, try *int,
+	f *drive.File, contentLength int64, try *int,
 	currentOffset *int64, sessionURI *string) (HTTPResponseResult, error) {
 	if *try == maxRetries {
 		if err != nil {
@@ -288,8 +257,7 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
 	case resp.StatusCode == http.StatusNotFound:
 		// The upload URI has expired; we need to refresh it. (It
 		// has a ~24 hour lifetime.)
-		*sessionURI, err = gd.getResumableUploadURI(f, contentType,
-			contentLength)
+		*sessionURI, err = gd.getResumableUploadURI(f, contentLength)
 		gd.debug("Got %v after updating URI from 404...", err)
 		if err != nil {
 			return Fail, err
@@ -318,13 +286,7 @@ func (gd *GDrive) handleResumableUploadResponse(resp *http.Response, err error,
 // refreshes in the middle of an upload, unlike the regular approach.
 func (gd *GDrive) UploadFileContentsResumable(file *File,
 	contentsReader io.Reader, contentLength int64) error {
-	contentsReader, contentType, err := detectContentType(contentsReader)
-	if err != nil {
-		return err
-	}
-
-	sessionURI, err := gd.getResumableUploadURI(file.driveFile(), contentType,
-		contentLength)
+	sessionURI, err := gd.getResumableUploadURI(file.driveFile(), contentLength)
 	if err != nil {
 		return err
 	}
@@ -365,7 +327,7 @@ func (gd *GDrive) UploadFileContentsResumable(file *File,
 			return err
 		}
 		req.ContentLength = int64(end - currentOffset)
-		req.Header.Set("Content-Type", contentType)
+		req.Header.Set("Content-Type", "application/octet-stream")
 		req.Header.Set("Content-Range",
 			fmt.Sprintf("bytes %d-%d/%d", currentOffset, end-1, contentLength))
 		req.Header.Set("User-Agent", "skicka/0.1")
@@ -374,7 +336,7 @@ func (gd *GDrive) UploadFileContentsResumable(file *File,
 		resp, err := gd.client.Do(req)
 
 		status, err := gd.handleResumableUploadResponse(resp, err,
-			file.driveFile(), contentType, contentLength, &try, &currentOffset,
+			file.driveFile(), contentLength, &try, &currentOffset,
 			&sessionURI)
 
 		if resp != nil {
