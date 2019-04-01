@@ -539,7 +539,7 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 		// With that check out of the way, take the opportunity to make sure
 		// the file has all of the properties that we expect.
 		if err := createMissingProperties(driveFile, stat.Mode(), encrypt); err != nil {
-			debug.Printf("%s: error creating properties: %s", driveFile, err)
+			debug.Printf("%v: error creating properties: %s", *driveFile, err)
 			return false, err
 		}
 
@@ -547,7 +547,7 @@ func fileNeedsUpload(localPath, drivePath string, stat os.FileInfo,
 		bitsString := fmt.Sprintf("%#o", stat.Mode()&os.ModePerm)
 		debug.Printf("%s: updating permissions to %s", drivePath, bitsString)
 		if err := gd.UpdateProperty(driveFile, "Permissions", bitsString); err != nil {
-			debug.Printf("%s: error updating permissions properties: %s", driveFile, err)
+			debug.Printf("%v: error updating permissions properties: %s", *driveFile, err)
 			return false, err
 		}
 
