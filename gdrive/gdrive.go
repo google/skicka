@@ -1015,7 +1015,16 @@ func (gd *GDrive) GetFileContents(f *File) (io.ReadCloser, error) {
 			// Rate-limit the download, if required.
 			return makeLimitedDownloadReader(resp.Body), nil
 		case Fail:
-			return nil, err
+			if resp != nil && resp.Body != nil {
+				defer resp.Body.Close()
+			}
+			if err != nil {
+				return nil, err
+			} else if resp != nil {
+				return nil, fmt.Errorf("%s", resp.Status)
+			} else {
+				return nil, fmt.Errorf("unknown error")
+			}
 		case Retry:
 		}
 	}
